@@ -72,6 +72,7 @@
 #define	PG_MANAGED	PG_AVAIL2
 #define	PG_FRAME	(0x000ffffffffff000ul)
 #define	PG_PS_FRAME	(0x000fffffffe00000ul)
+#define	PG_1GB_PS_FRAME	(0x000fffffc0000000ul)
 #define	PG_PROT		(PG_RW|PG_U)	/* all protection bits . */
 #define PG_N		(PG_NC_PWT|PG_NC_PCD)	/* Non-cacheable */
 
@@ -228,6 +229,7 @@ pte_store(pt_entry_t *ptep, pt_entry_t pte)
 #define	pte_clear(ptep)		pte_store((ptep), (pt_entry_t)0ULL)
 
 #define	pde_store(pdep, pde)	pte_store((pdep), (pde))
+#define	pdpe_store(pdpep, pdpe)	pte_store((pdpep), (pdpe))
 
 extern pt_entry_t pg_nx;
 
