@@ -646,6 +646,14 @@ vtopde(vm_offset_t va)
 	return (PDmap + ((va >> PDRSHIFT) & mask));
 }
 
+static __inline pdp_entry_t *
+vtopdpe(vm_offset_t va)
+{
+	u_int64_t mask = ((1ul << (NPDPEPGSHIFT + NPML4EPGSHIFT)) - 1);
+
+	return (PDPmap + ((va >> PDPSHIFT) & mask));
+}
+
 static u_int64_t
 allocpages(vm_paddr_t *firstaddr, int n)
 {

@@ -111,6 +111,7 @@
 #define	EPT_PG_EMUL_RW	X86_PG_AVAIL(53)
 #define	PG_FRAME	(0x000ffffffffff000ul)
 #define	PG_PS_FRAME	(0x000fffffffe00000ul)
+#define	PG_1GB_PS_FRAME	(0x000fffffc0000000ul)
 
 /*
  * Promotion to a 2MB (PDE) page mapping requires that the corresponding 4KB
@@ -269,6 +270,7 @@ pt_entry_t *vtopte(vm_offset_t);
 #define	pte_clear(ptep)			pte_store(ptep, 0)
 
 #define	pde_store(pdep, pde)		pte_store(pdep, pde)
+#define	pdpe_store(pdpep, pdpe)		pte_store(pdpep, pdpe)
 
 extern pt_entry_t pg_nx;
 

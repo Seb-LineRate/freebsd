@@ -133,6 +133,7 @@
 #define	trunc_page(x)	((unsigned long)(x) & ~(PAGE_MASK))
 #define trunc_2mpage(x)	((unsigned long)(x) & ~PDRMASK)
 #define round_2mpage(x)	((((unsigned long)(x)) + PDRMASK) & ~PDRMASK)
+#define round_1gpage(x)	((((unsigned long)(x)) + PDPMASK) & ~PDPMASK)
 #define trunc_1gpage(x)	((unsigned long)(x) & ~PDPMASK)
 
 #define	atop(x)		((unsigned long)(x) >> PAGE_SHIFT)
