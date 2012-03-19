@@ -118,7 +118,7 @@
  * the physical memory allocator reduces the likelihood of both 2MB
  * page TLB misses and cache misses caused by 2MB page TLB misses.
  */
-#define	VM_NFREEORDER		13
+#define	VM_NFREEORDER		19
 
 /*
  * Only one memory domain.
