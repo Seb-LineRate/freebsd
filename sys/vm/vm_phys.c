@@ -141,16 +141,16 @@ sysctl_vm_phys_free(SYSCTL_HANDLER_ARGS)
 	sbuf_new_for_sysctl(&sbuf, NULL, 128, req);
 	for (flind = 0; flind < vm_nfreelists; flind++) {
 		sbuf_printf(&sbuf, "\nFREE LIST %d:\n"
-		    "\n  ORDER (SIZE)  |  NUMBER"
-		    "\n              ", flind);
+		    "\n   ORDER (SIZE)  |  NUMBER"
+		    "\n               ", flind);
 		for (pind = 0; pind < VM_NFREEPOOL; pind++)
 			sbuf_printf(&sbuf, "  |  POOL %d", pind);
-		sbuf_printf(&sbuf, "\n--            ");
+		sbuf_printf(&sbuf, "\n--             ");
 		for (pind = 0; pind < VM_NFREEPOOL; pind++)
 			sbuf_printf(&sbuf, "-- --      ");
 		sbuf_printf(&sbuf, "--\n");
 		for (oind = VM_NFREEORDER - 1; oind >= 0; oind--) {
-			sbuf_printf(&sbuf, "  %2d (%6dK)", oind,
+			sbuf_printf(&sbuf, "  %2d (%7dK)", oind,
 			    1 << (PAGE_SHIFT - 10 + oind));
 			for (pind = 0; pind < VM_NFREEPOOL; pind++) {
 				fl = vm_phys_free_queues[flind][pind];
@@ -686,7 +686,7 @@ vm_phys_free_pages(vm_page_t m, int order)
 	pa = VM_PAGE_TO_PHYS(m);
 	seg = &vm_phys_segs[m->segind];
 	while (order < VM_NFREEORDER - 1) {
-		pa_buddy = pa ^ (1 << (PAGE_SHIFT + order));
+		pa_buddy = pa ^ (1 << (PAGE_SHIFT + order));  // pa_buddy is the other order-sized chunk needed to make an aligned (order+1)-sized chunk
 		if (pa_buddy < seg->start ||
 		    pa_buddy >= seg->end)
 			break;
@@ -991,16 +991,16 @@ DB_SHOW_COMMAND(freepages, db_show_freepages)
 
 	for (flind = 0; flind < vm_nfreelists; flind++) {
 		db_printf("FREE LIST %d:\n"
-		    "\n  ORDER (SIZE)  |  NUMBER"
-		    "\n              ", flind);
+		    "\n    ORDER (SIZE)  |  NUMBER"
+		    "\n                ", flind);
 		for (pind = 0; pind < VM_NFREEPOOL; pind++)
 			db_printf("  |  POOL %d", pind);
-		db_printf("\n--            ");
+		db_printf("\n--             ");
 		for (pind = 0; pind < VM_NFREEPOOL; pind++)
 			db_printf("-- --      ");
 		db_printf("--\n");
 		for (oind = VM_NFREEORDER - 1; oind >= 0; oind--) {
-			db_printf("  %2.2d (%6.6dK)", oind,
+			db_printf("  %2.2d (%7.7dK)", oind,
 			    1 << (PAGE_SHIFT - 10 + oind));
 			for (pind = 0; pind < VM_NFREEPOOL; pind++) {
 				fl = vm_phys_free_queues[flind][pind];
