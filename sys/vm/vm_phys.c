@@ -175,16 +175,16 @@ sysctl_vm_phys_free(SYSCTL_HANDLER_ARGS)
 		sbuf_printf(&sbuf,"\nDOMAIN %d:\n", dom);
 		for (flind = 0; flind < vm_nfreelists; flind++) {
 			sbuf_printf(&sbuf, "\nFREE LIST %d:\n"
-			    "\n  ORDER (SIZE)  |  NUMBER"
-			    "\n              ", flind);
+			    "\n   ORDER (SIZE)  |  NUMBER"
+			    "\n               ", flind);
 			for (pind = 0; pind < VM_NFREEPOOL; pind++)
 				sbuf_printf(&sbuf, "  |  POOL %d", pind);
-			sbuf_printf(&sbuf, "\n--            ");
+			sbuf_printf(&sbuf, "\n--             ");
 			for (pind = 0; pind < VM_NFREEPOOL; pind++)
 				sbuf_printf(&sbuf, "-- --      ");
 			sbuf_printf(&sbuf, "--\n");
 			for (oind = VM_NFREEORDER - 1; oind >= 0; oind--) {
-				sbuf_printf(&sbuf, "  %2d (%6dK)", oind,
+				sbuf_printf(&sbuf, "  %2d (%7dK)", oind,
 				    1 << (PAGE_SHIFT - 10 + oind));
 				for (pind = 0; pind < VM_NFREEPOOL; pind++) {
 				fl = vm_phys_free_queues[dom][flind][pind];
@@ -1453,16 +1453,16 @@ DB_SHOW_COMMAND(freepages, db_show_freepages)
 		db_printf("DOMAIN: %d\n", dom);
 		for (flind = 0; flind < vm_nfreelists; flind++) {
 			db_printf("FREE LIST %d:\n"
-			    "\n  ORDER (SIZE)  |  NUMBER"
-			    "\n              ", flind);
+			    "\n    ORDER (SIZE)  |  NUMBER"
+			    "\n                ", flind);
 			for (pind = 0; pind < VM_NFREEPOOL; pind++)
 				db_printf("  |  POOL %d", pind);
-			db_printf("\n--            ");
+			db_printf("\n--             ");
 			for (pind = 0; pind < VM_NFREEPOOL; pind++)
 				db_printf("-- --      ");
 			db_printf("--\n");
 			for (oind = VM_NFREEORDER - 1; oind >= 0; oind--) {
-				db_printf("  %2.2d (%6.6dK)", oind,
+				db_printf("  %2.2d (%7.7dK)", oind,
 				    1 << (PAGE_SHIFT - 10 + oind));
 				for (pind = 0; pind < VM_NFREEPOOL; pind++) {
 				fl = vm_phys_free_queues[dom][flind][pind];
