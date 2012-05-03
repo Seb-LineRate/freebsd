@@ -48,9 +48,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mutex.h>
-#if MAXMEMDOM > 1
 #include <sys/proc.h>
-#endif
 #include <sys/queue.h>
 #include <sys/sbuf.h>
 #include <sys/sysctl.h>
@@ -61,6 +59,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm.h>
 #include <vm/vm_param.h>
 #include <vm/vm_kern.h>
+#include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_phys.h>
@@ -144,6 +143,15 @@ vm_phys_domain_intersects(long mask, vm_paddr_t low, vm_paddr_t high)
 	}
 	return (FALSE);
 }
+
+static int vm_pid_to_dump_pmap = -1;
+SYSCTL_INT(_debug, OID_AUTO, pid_to_dump_pmap, CTLFLAG_RW, &vm_pid_to_dump_pmap, 0, "The PID to show the pmap for (-1 to disable).");
+
+static uint64_t vm_pointer_to_dump_pmap = 0;
+SYSCTL_ULONG(_debug, OID_AUTO, pointer_to_dump_pmap, CTLFLAG_RW, &vm_pointer_to_dump_pmap, 0, "The pointer to show the pmap for (0 to disable).");
+
+static int sysctl_dump_pmap(SYSCTL_HANDLER_ARGS);
+SYSCTL_PROC(_debug, OID_AUTO, dump_pmap, CTLTYPE_STRING | CTLFLAG_RD, NULL, 0, sysctl_dump_pmap, "A", "Process pmap");
 
 /*
  * Outputs the state of the physical memory allocator, specifically,
@@ -238,6 +246,375 @@ vm_freelist_rem(struct vm_freelist *fl, vm_page_t m, int order)
 	fl[order].lcnt--;
 	m->order = VM_NFREEORDER;
 }
+
+
+// Use in place of printf to handle sysctl and db_printf
+typedef int (*printf_t)(void * arg, const char * fmt, ... );
+
+
+/*
+ * These functions emit the page map of a virtual address in a pid, via a
+ * sysctl.
+ *
+ * For information on the physical page map, see section 4.5 "IA-32E
+ * PAGING" of Volume 3A of the "Intel 64 and IA-32 Architectures Software
+ * Developer's Manual".
+ */
+
+// must be called with the pmap locked
+static void
+db_dump_pte(printf_t p_printf, void *p_arg, pt_entry_t *pt, int index)
+{
+	pt_entry_t *pte = &pt[index];
+
+	p_printf(p_arg, "                                PTE (index %d) @ %p (DMAP KVA): 0x%016lx (", index, pte, *pte);
+
+	if ((*pte & PG_V) == 0) {
+		p_printf(p_arg, " NotPresent )\n");
+		return;
+	} else {
+		p_printf(p_arg, " Present");
+	}
+
+	if (*pte & PG_RW)     p_printf(p_arg, " Writable");
+	if (*pte & PG_U)      p_printf(p_arg, " User");
+	if (*pte & PG_NC_PWT) p_printf(p_arg, " WriteThrough");
+	if (*pte & PG_NC_PCD) p_printf(p_arg, " CacheDisable");
+	if (*pte & PG_A)      p_printf(p_arg, " Accessed");
+	if (*pte & PG_M)      p_printf(p_arg, " Dirty");
+	// the PTE has no PS bit
+	if (*pte & PG_NX)     p_printf(p_arg, " ExecuteDisable");
+
+	// "pseudo flags"
+	if (*pte & PG_W)       p_printf(p_arg, " Wired");
+	if (*pte & PG_MANAGED) p_printf(p_arg, " Managed");
+
+	p_printf(p_arg, " )\n");
+
+	{
+		uint8_t *p;
+		p = (uint8_t *)PHYS_TO_DMAP(*pte & PG_FRAME);
+		p_printf(
+			p_arg,
+			"                                    contents: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
+			*p,
+			*(p+1),
+			*(p+2),
+			*(p+3),
+			*(p+4),
+			*(p+5),
+			*(p+6),
+			*(p+7)
+		);
+		return;
+	}
+}
+
+
+// must be called with the pmap locked
+static void
+db_dump_pt(printf_t p_printf, void *p_arg, pt_entry_t *pt)
+{
+	int i;
+
+	p_printf(p_arg, "                            PT @ %p (DMAP KVA):\n", pt);
+	i = (vm_pointer_to_dump_pmap >> 12) & 0x1ff;
+	db_dump_pte(p_printf, p_arg, pt, i);
+}
+
+
+// must be called with the pmap locked
+static void
+db_dump_pde(printf_t p_printf, void *p_arg, pd_entry_t *pd, int index)
+{
+	pd_entry_t *pde = &pd[index];
+
+	p_printf(p_arg, "                        PDE (index %d) @ %p (DMAP KVA): 0x%016lx (", index, pde, *pde);
+
+	if ((*pde & PG_V) == 0) {
+		p_printf(p_arg, " NotPresent )\n");
+		return;
+	} else {
+		p_printf(p_arg, " Present");
+	}
+
+	if (*pde & PG_RW)     p_printf(p_arg, " Writable");
+	if (*pde & PG_U)      p_printf(p_arg, " User");
+	if (*pde & PG_NC_PWT) p_printf(p_arg, " WriteThrough");
+	if (*pde & PG_NC_PCD) p_printf(p_arg, " CacheDisable");
+	if (*pde & PG_A)      p_printf(p_arg, " Accessed");
+
+        // the Dirty bit is only used on superpage PDEs, it's ignored if the PS bit is not set
+	if (*pde & PG_PS) {
+            if (*pde & PG_M) p_printf(p_arg, " Dirty");
+            p_printf(p_arg, " PageSize");
+        }
+
+	if (*pde & PG_NX)     p_printf(p_arg, " ExecuteDisable");
+
+	// "pseudo flags"
+	if (*pde & PG_W)       p_printf(p_arg, " Wired");
+	if (*pde & PG_MANAGED) p_printf(p_arg, " Managed");
+
+	p_printf(p_arg, " )\n");
+
+	if (*pde & PG_PS) {
+		uint8_t *p;
+		p = (uint8_t *)PHYS_TO_DMAP(*pde & PG_FRAME);
+		p_printf(
+			p_arg,
+			"                            contents: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
+			*p,
+			*(p+1),
+			*(p+2),
+			*(p+3),
+			*(p+4),
+			*(p+5),
+			*(p+6),
+			*(p+7)
+		);
+		return;
+	}
+
+	db_dump_pt(p_printf, p_arg, (pt_entry_t *)PHYS_TO_DMAP(*pde & PG_FRAME));
+}
+
+
+// must be called with the pmap locked
+static void
+db_dump_pd(printf_t p_printf, void *p_arg, pd_entry_t *pd)
+{
+	int i;
+
+	p_printf(p_arg, "                    PD @ %p (DMAP KVA)\n", pd);
+	i = (vm_pointer_to_dump_pmap >> 21) & 0x1ff;
+	db_dump_pde(p_printf, p_arg, pd, i);
+}
+
+
+// must be called with the pmap locked
+static void
+db_dump_pdpte(printf_t p_printf, void *p_arg, pdp_entry_t *pdpt, int index)
+{
+	pdp_entry_t *pdpte = &pdpt[index];
+
+	p_printf(p_arg, "                PDPTE (index %d) @ %p (DMAP KVA): 0x%016lx (", index, pdpte, *pdpte);
+
+	if ((*pdpte & PG_V) == 0) {
+		p_printf(p_arg, " NotPresent )\n");
+		return;
+	} else {
+		p_printf(p_arg, " Present");
+	}
+
+	if (*pdpte & PG_RW)     p_printf(p_arg, " Writable");
+	if (*pdpte & PG_U)      p_printf(p_arg, " User");
+	if (*pdpte & PG_NC_PWT) p_printf(p_arg, " WriteThrough");
+	if (*pdpte & PG_NC_PCD) p_printf(p_arg, " CacheDisable");
+	if (*pdpte & PG_A)      p_printf(p_arg, " Accessed");
+
+        // the Dirty bit is only used on superpage PDPTEs, it's ignored if the PS bit is not set
+	if (*pdpte & PG_PS) {
+            if (*pdpte & PG_M) p_printf(p_arg, " Dirty");
+            p_printf(p_arg, " PageSize");
+        }
+
+	if (*pdpte & PG_NX)     p_printf(p_arg, " ExecuteDisable");
+
+	// "pseudo flags"
+	if (*pdpte & PG_W)       p_printf(p_arg, " Wired");
+	if (*pdpte & PG_MANAGED) p_printf(p_arg, " Managed");
+
+	p_printf(p_arg, " )\n");
+
+	if (*pdpte & PG_PS) {
+		uint8_t *p;
+		p = (uint8_t *)PHYS_TO_DMAP(*pdpte & PG_FRAME);
+		p_printf(
+			p_arg,
+			"                            contents: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
+			*p,
+			*(p+1),
+			*(p+2),
+			*(p+3),
+			*(p+4),
+			*(p+5),
+			*(p+6),
+			*(p+7)
+		);
+		return;
+	}
+	db_dump_pd(p_printf, p_arg, (pd_entry_t *)PHYS_TO_DMAP(*pdpte & PG_FRAME));
+}
+
+
+// must be called with the pmap locked
+static void
+db_dump_pdpt(printf_t p_printf, void *p_arg, pdp_entry_t *pdpt)
+{
+	int i;
+
+	p_printf(p_arg, "            PDPT @ %p (DMAP KVA):\n", pdpt);
+	i = (vm_pointer_to_dump_pmap >> 30) & 0x1ff;
+	db_dump_pdpte(p_printf, p_arg, pdpt, i);
+}
+
+
+// must be called with the pmap locked
+static void
+db_dump_pml4e(printf_t p_printf, void *p_arg, pml4_entry_t *pml4, int index)
+{
+	pml4_entry_t *pml4e = &pml4[index];
+
+	p_printf(p_arg, "        PML4E (index %d) @ %p (KVA): 0x%016lx (", index, pml4e, *pml4e);
+
+	if ((*pml4e & PG_V) == 0) {
+		p_printf(p_arg, " NotPresent )\n");
+		return;
+	} else {
+		p_printf(p_arg, " Present");
+	}
+
+	if (*pml4e & PG_RW)     p_printf(p_arg, " Writable");
+	if (*pml4e & PG_U)      p_printf(p_arg, " User");
+	if (*pml4e & PG_NC_PWT) p_printf(p_arg, " WriteThrough");
+	if (*pml4e & PG_NC_PCD) p_printf(p_arg, " CacheDisable");
+	if (*pml4e & PG_A)      p_printf(p_arg, " Accessed");
+	if (*pml4e & PG_NX)     p_printf(p_arg, " ExecuteDisable");
+	p_printf(p_arg, " )\n");
+
+	db_dump_pdpt(p_printf, p_arg, (pdp_entry_t *)PHYS_TO_DMAP(*pml4e & PG_FRAME));
+}
+
+
+// must be called with the pmap locked
+static void
+db_dump_pml4(printf_t p_printf, void *p_arg, pml4_entry_t *pml4)
+{
+	int i;
+
+	p_printf(p_arg, "    PML4 @ %p (KVA):\n", pml4);
+	i = (vm_pointer_to_dump_pmap >> 39) & 0x1ff;
+	db_dump_pml4e(p_printf, p_arg, pml4, i);
+}
+
+
+static int
+sysctl_dump_pmap(SYSCTL_HANDLER_ARGS)
+{
+	struct sbuf *sb;
+	struct proc *p;
+	int error;
+
+
+	sb = sbuf_new(NULL, NULL, 2 * 1024, SBUF_FIXEDLEN);
+	if (sb == NULL) {
+		printf("out of memory in dump_pmap sysctl\n");
+		return ENOMEM;
+	}
+
+	if (vm_pointer_to_dump_pmap == 0) {
+		sbuf_printf(sb, "no pointer specified in pointer_to_dump_pmap\n");
+		goto done;
+	}
+
+	// pfind() returns the process locked
+	p = pfind(vm_pid_to_dump_pmap);
+	if (p == NULL) {
+		sbuf_printf(sb, "pid_to_dump_pmap %d not found\n", vm_pid_to_dump_pmap);
+		goto done;
+	}
+
+	sbuf_printf(sb, "pmap of pid %d (virtual address 0x%016lx):\n", vm_pid_to_dump_pmap, vm_pointer_to_dump_pmap);
+
+	{
+		uint64_t cr0, cr3, cr4, ia32_efer;
+		unsigned int cpuid_val[4];
+
+		cr0 = rcr0();
+		cr3 = rcr3();
+		cr4 = rcr4();
+		ia32_efer = rdmsr(MSR_EFER);
+		do_cpuid(0x80000001, cpuid_val);
+
+
+		sbuf_printf(sb, "    CR0: 0x%016lx (", cr0);
+
+		if (cr0 & (1<<31)) sbuf_printf(sb, " Paging");
+		else sbuf_printf(sb, " ~Paging");
+
+		if (cr0 & (1<<0))  sbuf_printf(sb, " ProtectionEnable");
+		else sbuf_printf(sb, " ~ProtectionEnable");
+
+		sbuf_printf(sb, " )\n");
+
+
+		sbuf_printf(sb, "    CR3: 0x%016lx (", cr3);
+
+		if (cr3 & (1<<4)) sbuf_printf(sb, " PageLevelCacheDisable");
+		else sbuf_printf(sb, " ~PageLevelCacheDisable");
+
+		if (cr3 & (1<<3)) sbuf_printf(sb, " PageLevelWriteThrough");
+		else sbuf_printf(sb, " ~PageLevelWriteThrough");
+
+		sbuf_printf(sb, " )\n");
+
+
+		sbuf_printf(sb, "    CR4: 0x%016lx (", cr4);
+
+		if (cr4 & (1<<4)) sbuf_printf(sb, " PageSizeExtensions");
+		else sbuf_printf(sb, " ~PageSizeExtensions");
+
+		if (cr4 & (1<<5)) sbuf_printf(sb, " PhysicalAddressExtension");
+		else sbuf_printf(sb, " ~PhysicalAddressExtension");
+
+		if (cr4 & (1<<7)) sbuf_printf(sb, " PageGlobalEnable");
+		else sbuf_printf(sb, " ~PageGlobalEnable");
+
+		if (cr4 & (1<<17)) sbuf_printf(sb, " PCIDEnable");
+		else sbuf_printf(sb, " ~PCIDEnable");
+
+		sbuf_printf(sb, " )\n");
+
+
+		sbuf_printf(sb, "    MSR IA32_EFER: 0x%016lx (", ia32_efer);
+
+		if (ia32_efer & (1<<8)) sbuf_printf(sb, " IA32eModeEnable");
+		else sbuf_printf(sb, " ~IA32eModeEnable");
+
+		if (ia32_efer & (1<<10)) sbuf_printf(sb, " IA32eModeActive");
+		else sbuf_printf(sb, " ~IA32eModeActive");
+
+		sbuf_printf(sb, " )\n");
+
+
+		sbuf_printf(sb, "    CPUID 0x80000001:\n");
+		sbuf_printf(sb, "        eax=0x%08x\n", cpuid_val[0]);
+		sbuf_printf(sb, "        ebx=0x%08x\n", cpuid_val[1]);
+		sbuf_printf(sb, "        ecx=0x%08x\n", cpuid_val[2]);
+		sbuf_printf(sb, "        edx=0x%08x (", cpuid_val[3]);
+
+		if (cpuid_val[3] & (1<<26)) sbuf_printf(sb, " Page1GB");
+		else sbuf_printf(sb, " ~Page1GB");
+
+		sbuf_printf(sb, " )\n");
+	}
+
+	PMAP_LOCK(&p->p_vmspace->vm_pmap);
+
+	sbuf_printf(sb, "physical map: %p\n", &p->p_vmspace->vm_pmap);
+	db_dump_pml4((printf_t)sbuf_printf, sb, p->p_vmspace->vm_pmap.pm_pml4);
+
+	PMAP_UNLOCK(&p->p_vmspace->vm_pmap);
+	PROC_UNLOCK(p);
+
+done:
+	sbuf_finish(sb);
+	error = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
+	sbuf_delete(sb);
+	return (error);
+}
+
 
 /*
  * Create a physical memory segment.

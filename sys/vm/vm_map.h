@@ -69,6 +69,7 @@
 #include <sys/lock.h>
 #include <sys/sx.h>
 #include <sys/_mutex.h>
+#include <vm/pmap.h>
 
 /*
  *	Types defined:
