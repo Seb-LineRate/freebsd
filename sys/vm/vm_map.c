@@ -78,6 +78,8 @@ __FBSDID("$FreeBSD$");
 #include <sys/racct.h>
 #include <sys/resourcevar.h>
 #include <sys/file.h>
+#include <sys/sbuf.h>
+#include <sys/linker_set.h>
 #include <sys/sysctl.h>
 #include <sys/sysent.h>
 #include <sys/shm.h>
@@ -94,6 +96,17 @@ __FBSDID("$FreeBSD$");
 #include <vm/vnode_pager.h>
 #include <vm/swap_pager.h>
 #include <vm/uma.h>
+
+
+static int vm_pid_to_dump_vm_map = -1;
+SYSCTL_INT(_debug, OID_AUTO, pid_to_dump_vm_map, CTLFLAG_RW, &vm_pid_to_dump_vm_map, 0, "The PID to show the vm_map for (-1 to disable).");
+
+static uint64_t vm_pointer_to_dump_vm_map = 0;
+SYSCTL_ULONG(_debug, OID_AUTO, pointer_to_dump_vm_map, CTLFLAG_RW, &vm_pointer_to_dump_vm_map, 0, "The pointer to show the vm_map for (0 to disable).");
+
+static int sysctl_dump_vm_map(SYSCTL_HANDLER_ARGS);
+SYSCTL_PROC(_debug, OID_AUTO, dump_vm_map, CTLTYPE_STRING | CTLFLAG_RD, NULL, 0, sysctl_dump_vm_map, "A", "Process vm_map");
+
 
 /*
  *	Virtual memory maps provide for the mapping, protection,
@@ -3965,6 +3978,197 @@ vm_map_lookup_done(vm_map_t map, vm_map_entry_t entry)
 	 */
 	vm_map_unlock_read(map);
 }
+
+
+static void
+sysctl_dump_vm_page(struct sbuf *sb, struct vm_page *page)
+{
+	uint8_t *p;
+
+	if (page == NULL) {
+		sbuf_printf(sb, "        (NULL page)\n");
+		return;
+	}
+
+	sbuf_printf(sb, "        page (%p)\n", page);
+	sbuf_printf(sb, "            pindex: %ld (0x%016lx)\n", page->pindex, page->pindex);
+	sbuf_printf(sb, "            phys_addr: 0x%016lx\n", page->phys_addr);
+	sbuf_printf(sb, "            order: %d\n", page->order);
+	sbuf_printf(sb, "            wire_count: %u\n", page->wire_count);
+	sbuf_printf(sb, "            valid: 0x%02x\n", page->valid);
+	sbuf_printf(sb, "            flags=0x%04hx", page->flags);
+	if (page->flags != 0) {
+		sbuf_printf(sb, " (");
+		if (page->flags & PG_CACHED)      sbuf_printf(sb, " Cached");
+		if (page->flags & PG_FREE)        sbuf_printf(sb, " Free");
+		if (page->flags & PG_FICTITIOUS)  sbuf_printf(sb, " Fictitious");
+		if (page->flags & PG_ZERO)        sbuf_printf(sb, " Zero");
+		if (page->flags & PG_MARKER)      sbuf_printf(sb, " Marker");
+		if (page->flags & PG_SLAB)        sbuf_printf(sb, " Slab");
+		if (page->flags & PG_WINATCFLS)   sbuf_printf(sb, " Winatcfls");    // Win at tickle fleas
+		if (page->flags & PG_NODUMP)      sbuf_printf(sb, " NoDump");
+		sbuf_printf(sb, " )");
+	}
+	sbuf_printf(sb, "\n");
+
+	p = (uint8_t *)PHYS_TO_DMAP(page->phys_addr);
+	sbuf_printf(
+		sb,
+		"            contents: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
+		*p,
+		*(p+1),
+		*(p+2),
+		*(p+3),
+		*(p+4),
+		*(p+5),
+		*(p+6),
+		*(p+7)
+	);
+}
+
+
+static void
+sysctl_dump_vm_object(struct sbuf *sb, struct vm_object *object, struct vm_map_entry *map_entry)
+{
+	if (object == NULL) {
+		sbuf_printf(sb, "        (NULL object)\n");
+		return;
+	}
+
+	sbuf_printf(sb, "        size: %ld (4k pages)\n", object->size);
+	sbuf_printf(sb, "        ref_count: %d\n", object->ref_count);
+	sbuf_printf(sb, "        shadow_count: %d\n", object->shadow_count);
+	if (object->type == OBJT_DEFAULT) sbuf_printf(sb, "        object type: DEFAULT\n");
+	if (object->type == OBJT_SWAP)    sbuf_printf(sb, "        object type: SWAP\n");
+	if (object->type == OBJT_VNODE)   sbuf_printf(sb, "        object type: VNODE\n");
+	if (object->type == OBJT_DEVICE)  sbuf_printf(sb, "        object type: DEVICE\n");
+	if (object->type == OBJT_PHYS)    sbuf_printf(sb, "        object type: PHYS\n");
+	if (object->type == OBJT_DEAD)    sbuf_printf(sb, "        object type: DEAD\n");
+	if (object->type == OBJT_SG)      sbuf_printf(sb, "        object type: SG\n");
+	sbuf_printf(sb, "        memattr: 0x%02x\n", object->memattr);
+
+	sbuf_printf(sb, "        flags: 0x%04hx", object->flags);
+	if (object->flags != 0) sbuf_printf(sb, " (");
+	if (object->flags & OBJ_ACTIVE) sbuf_printf(sb, " Active");
+	if (object->flags & OBJ_DEAD) sbuf_printf(sb, " Dead");
+	if (object->flags & OBJ_NOSPLIT) sbuf_printf(sb, " Nosplit");
+	if (object->flags & OBJ_PIPWNT) sbuf_printf(sb, " PagingInProgressWanted");
+	if (object->flags & OBJ_MIGHTBEDIRTY) sbuf_printf(sb, " MightBeDirty");
+	if (object->flags & OBJ_COLORED) sbuf_printf(sb, " Colored");
+	if (object->flags & OBJ_ONEMAPPING) sbuf_printf(sb, " OneMapping");
+	if (object->flags & OBJ_DISCONNECTWNT) sbuf_printf(sb, " DisconnectWanted");
+	if (object->flags != 0) sbuf_printf(sb, " )");
+	sbuf_printf(sb, "\n");
+
+	sbuf_printf(sb, "        resident pages in object: %d\n", object->resident_page_count);
+	sbuf_printf(sb, "        backing_object offset: 0x%016lx\n", object->backing_object_offset);
+	sbuf_printf(sb, "        backing_object: %p\n", object->backing_object);
+
+	if (object->backing_object == NULL) {
+		struct vm_page *page;
+		vm_pindex_t pindex;
+
+		// the pages are in *this* object, not a backing one
+
+		pindex = (vm_pointer_to_dump_vm_map - map_entry->start)/PAGE_SIZE;
+
+		page = TAILQ_FIRST(&object->memq);
+		while (page != NULL) {
+	        	if (page->pindex == pindex) {
+				sysctl_dump_vm_page(sb, page);
+				break;
+			}
+			page = TAILQ_NEXT(page, listq);
+		}
+	} else {
+		sysctl_dump_vm_object(sb, object->backing_object, map_entry);
+	}
+}
+
+
+static void
+sysctl_dump_vm_map_entry(struct sbuf *sb, struct vm_map_entry *map_entry)
+{
+	if (map_entry == NULL) {
+		sbuf_printf(sb, "        (NULL map entry)\n");
+		return;
+	}
+
+	sbuf_printf(sb, "vm_map_entry %p\n", map_entry);
+	sbuf_printf(sb, "    start: 0x%016lx\n", map_entry->start);
+	sbuf_printf(sb, "    end: 0x%016lx\n", map_entry->end);
+	sbuf_printf(sb, "    adj_free: 0x%016lx\n", map_entry->adj_free);
+	sbuf_printf(sb, "    max_free: 0x%016lx\n", map_entry->max_free);
+	sbuf_printf(sb, "    eflags: 0x%08x\n", map_entry->eflags);
+	sbuf_printf(sb, "    protection: 0x%02x\n", map_entry->protection);
+	sbuf_printf(sb, "    max_protection: 0x%02x\n", map_entry->max_protection);
+	sbuf_printf(sb, "    inherit: 0x%02x\n", map_entry->inheritance);
+	sbuf_printf(sb, "    wired_count: %d\n", map_entry->wired_count);
+	sbuf_printf(sb, "    offset: %ld\n", map_entry->offset);
+	if (map_entry->eflags & MAP_ENTRY_IS_SUB_MAP) {
+		sbuf_printf(sb, "    object (submap): %p\n", map_entry->object.sub_map);
+	} else {
+		sbuf_printf(sb, "    object (vm object): %p\n", map_entry->object.vm_object);
+		sysctl_dump_vm_object(sb, map_entry->object.vm_object, map_entry);
+	}
+}
+
+
+static int
+sysctl_dump_vm_map(SYSCTL_HANDLER_ARGS)
+{
+	struct sbuf *sb;
+	struct proc *p;
+	int error;
+	struct vm_map *map;
+	struct vm_map_entry *map_entry;
+
+
+	sb = sbuf_new(NULL, NULL, 100 * 1024, SBUF_FIXEDLEN);
+	if (sb == NULL) {
+		printf("out of memory in dump_vmmap sysctl\n");
+		return ENOMEM;
+	}
+
+	if (vm_pointer_to_dump_vm_map == 0) {
+		sbuf_printf(sb, "no pointer specified in pointer_to_dump_vm_map\n");
+		goto done;
+	}
+
+	// pfind() returns the process locked
+	p = pfind(vm_pid_to_dump_vm_map);
+	if (p == NULL) {
+		sbuf_printf(sb, "pid_to_dump_vm_map %d not found\n", vm_pid_to_dump_vm_map);
+		goto done;
+	}
+
+	sbuf_printf(sb, "vm_map of pid %d (virtual address 0x%016lx):\n", vm_pid_to_dump_vm_map, vm_pointer_to_dump_vm_map);
+
+	map = &p->p_vmspace->vm_map;
+
+	sbuf_printf(sb, "virtual map: %p\n", map);
+
+	map_entry = &map->header;
+	while (map_entry != NULL) {
+		if (
+			(map_entry->start <= vm_pointer_to_dump_vm_map)
+			&& (map_entry->end > vm_pointer_to_dump_vm_map)
+		) {
+			sysctl_dump_vm_map_entry(sb, map_entry);
+		}
+		map_entry = map_entry->next;
+		if (map_entry == &map->header) break;  // is the list a ring?  i don't know
+	}
+
+	PROC_UNLOCK(p);
+
+done:
+	sbuf_finish(sb);
+	error = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
+	sbuf_delete(sb);
+	return (error);
+}
+
 
 #include "opt_ddb.h"
 #ifdef DDB
