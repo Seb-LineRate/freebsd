@@ -1787,7 +1787,7 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
 static vm_page_t
 pmap_allocpde(pmap_t pmap, vm_offset_t va, int flags)
 {
-	vm_pindex_t pdpindex, ptepindex;
+	vm_pindex_t pdpindex, pdepindex;
 	pdp_entry_t *pdpe;
 	vm_page_t pdpg;
 
@@ -1802,8 +1802,8 @@ retry:
 		pdpg->wire_count++;
 	} else {
 		/* Allocate a pd page. */
-		ptepindex = pmap_pde_pindex(va);
-		pdpindex = ptepindex >> NPDPEPGSHIFT;
+		pdepindex = pmap_pde_pindex(va);
+		pdpindex = pdepindex >> NPDPEPGSHIFT;
 		pdpg = _pmap_allocpte(pmap, NUPDE + pdpindex, flags);
 		if (pdpg == NULL && (flags & M_WAITOK))
 			goto retry;
