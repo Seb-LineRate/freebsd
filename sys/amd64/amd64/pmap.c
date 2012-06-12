@@ -1644,8 +1644,34 @@ pmap_pinit(pmap_t pmap)
 }
 
 /*
- * this routine is called if the page table page is not
- * mapped correctly.
+ * This function is called if a page map is missing a table, that is, if a
+ * page map entry (a PML4E, a PDPE, or a PDE) for a virtual address is
+ * lacking the Valid (aka Present) bit.
+ *
+ * This function allocates a (4k) page, initializes it to all-bits-zero,
+ * and updates the invalid (not present) page map entry to point to the new
+ * page.
+ *
+ * The arguments are the page map, the "pteindex" (more on this later), and
+ * the memory allocation flag (which must be either M_WAITOK or M_NOWAIT).
+ *
+ * The pteindex is *not* the index of a Page Table Entry.  It is the index
+ * of a PDE, or a PDPE, or a PML4E.  All those indexes are in the range 0
+ * to 511 inclusive, and the type of index is indicated by adding specific
+ * constants to the index (using the high-order bits of the vm_pindex_t to
+ * indicate the level of the page map).
+ *
+ * If pteindex >= (NUPDE + NUPDPE), then the bottom 9 bits of pteindex is
+ * the PML4E index, and we're allocating a PDPT for the PML4E.
+ *
+ * If the pteindex >= NUPDE, then bits 9-17 are the index of the PML4E and
+ * bits 0-8 are the index of the PDPE (inside that PML4E's PDPT), and the
+ * PDPE at that location is invalid and needs a PDT.
+ *
+ * Otherwise, bits 18-26 are the PML4E index, bits 9-17 are the PDPE index,
+ * and bits 0-8 are the PDE index, and the PDE is invalid and needs a Page
+ * Table.
+ *
  *
  * Note: If a page allocation fails at page table level two or three,
  * one or two pages may be held during the wait, only to be released
