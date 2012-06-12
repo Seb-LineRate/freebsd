@@ -556,6 +556,8 @@ pmap_pdpe_to_pde(pdp_entry_t *pdpe, vm_offset_t va)
 {
 	pd_entry_t *pde;
 
+	KASSERT((*pdpe & PG_PS) == 0, ("pmap_pdpe_to_pde() trying to find PDT from a PDPE with PS!  pdpe=%p, *pdpe=0x%016lx, va=0x%016lx", pdpe, *pdpe, va));
+
 	pde = (pd_entry_t *)PHYS_TO_DMAP(*pdpe & PG_FRAME);
 	return (&pde[pmap_pde_index(va)]);
 }
@@ -571,6 +573,9 @@ pmap_pde(pmap_t pmap, vm_offset_t va)
 	pdpe = pmap_pdpe(pmap, va);
 	if (pdpe == NULL || (*pdpe & PG_V) == 0)
 		return (NULL);
+	if ((*pdpe & PG_PS) != 0) {
+		panic("pmap_pde() trying to find PDT from a PDPE with PS!  pmap=%p, va=0x%016lx (pdpe=%p, *pdpe=0x%016lx)", pmap, va, pdpe, *pdpe);
+	}
 	return (pmap_pdpe_to_pde(pdpe, va));
 }
 
@@ -579,6 +584,8 @@ static __inline pt_entry_t *
 pmap_pde_to_pte(pd_entry_t *pde, vm_offset_t va)
 {
 	pt_entry_t *pte;
+
+	KASSERT((*pde & PG_PS) == 0, ("pmap_pde_to_pte() trying to find PT from a PDE with PS!  pde=%p, *pde=0x%016lx, va=0x%016lx", pde, *pde, va));
 
 	pte = (pt_entry_t *)PHYS_TO_DMAP(*pde & PG_FRAME);
 	return (&pte[pmap_pte_index(va)]);
