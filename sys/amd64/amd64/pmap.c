@@ -798,6 +798,11 @@ pmap_init(void)
 		KASSERT(MAXPAGESIZES > 1 && pagesizes[1] == 0,
 		    ("pmap_init: can't assign to pagesizes[1]"));
 		pagesizes[1] = NBPDR;
+		KASSERT(MAXPAGESIZES > 2 && pagesizes[2] == 0,
+		    ("pmap_init: can't assign to pagesizes[2]"));
+		if ((amd_feature & AMDID_PAGE1GB) == AMDID_PAGE1GB) {
+			pagesizes[2] = NBPDP;
+		}
 	}
 
 	/*
