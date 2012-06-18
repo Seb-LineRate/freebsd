@@ -6409,9 +6409,11 @@ pmap_change_attr_locked(vm_offset_t va, vm_size_t size, int mode)
 	pd_entry_t *pde;
 	pt_entry_t *pte;
 	int cache_bits_pte, cache_bits_pde, error;
+	pt_entry_t PG_V;
 	boolean_t changed;
 
 	PMAP_LOCK_ASSERT(kernel_pmap, MA_OWNED);
+	PG_V = pmap_valid_bit(kernel_pmap);
 	base = trunc_page(va);
 	offset = va & PAGE_MASK;
 	size = round_page(offset + size);
@@ -6433,8 +6435,9 @@ pmap_change_attr_locked(vm_offset_t va, vm_size_t size, int mode)
 	 */
 	for (tmpva = base; tmpva < base + size; ) {
 		pdpe = pmap_pdpe(kernel_pmap, tmpva);
-		if (*pdpe == 0)
+		if ((pdpe == NULL) || (*pdpe & PG_V) == 0) {
 			return (EINVAL);
+		}
 		if (*pdpe & PG_PS) {
 			/*
 			 * If the current 1GB page already has the required
@@ -6460,8 +6463,9 @@ pmap_change_attr_locked(vm_offset_t va, vm_size_t size, int mode)
 				return (ENOMEM);
 		}
 		pde = pmap_pdpe_to_pde(pdpe, tmpva);
-		if (*pde == 0)
+		if ((*pde & PG_V) == 0) {
 			return (EINVAL);
+		}
 		if (*pde & PG_PS) {
 			/*
 			 * If the current 2MB page already has the required
@@ -6500,6 +6504,7 @@ pmap_change_attr_locked(vm_offset_t va, vm_size_t size, int mode)
 	pa_start = pa_end = 0;
 	for (tmpva = base; tmpva < base + size; ) {
 		pdpe = pmap_pdpe(kernel_pmap, tmpva);
+		// we already checked all the PDPEs in the for loop above
 		if (*pdpe & PG_PS) {
 			if ((*pdpe & X86_PG_PDE_CACHE) != cache_bits_pde) {
 				pmap_pde_attr(pdpe, cache_bits_pde,
