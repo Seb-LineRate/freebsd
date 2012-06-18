@@ -2265,8 +2265,13 @@ vm_page_free_toq(vm_page_t m)
 	m->valid = 0;
 	vm_page_undirty(m);
 
-	if (m->wire_count != 0)
-		panic("vm_page_free: freeing wired page %p", m);
+	if (m->wire_count != 0) {
+		if (m->wire_count > 1) {
+			panic("vm_page_free: page at pa=0x%016lx has invalid wire count (%d), pindex: 0x%lx",
+				VM_PAGE_TO_PHYS(m), m->wire_count, (long)m->pindex);
+		}
+		panic("vm_page_free: freeing wired page");
+	}
 	if (m->hold_count != 0) {
 		m->flags &= ~PG_ZERO;
 		KASSERT((m->flags & PG_UNHOLDFREE) == 0,
