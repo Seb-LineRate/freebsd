@@ -3994,6 +3994,7 @@ sysctl_dump_vm_page(struct sbuf *sb, struct vm_page *page)
 	sbuf_printf(sb, "            pindex: %ld (0x%016lx)\n", page->pindex, page->pindex);
 	sbuf_printf(sb, "            phys_addr: 0x%016lx\n", page->phys_addr);
 	sbuf_printf(sb, "            order: %d\n", page->order);
+	sbuf_printf(sb, "            wire_count: %u\n", page->wire_count);
 	sbuf_printf(sb, "            valid: 0x%02x\n", page->valid);
 	sbuf_printf(sb, "            flags=0x%04hx", page->flags);
 	if (page->flags != 0) {
