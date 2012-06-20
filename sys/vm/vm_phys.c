@@ -264,6 +264,11 @@ sysctl_dump_pte(struct sbuf *sb, pt_entry_t *pt, int index)
 	if (*pte & PG_M)      sbuf_printf(sb, " Dirty");
 	// the PTE has no PS bit
 	if (*pte & PG_NX)     sbuf_printf(sb, " ExecuteDisable");
+
+	// "pseudo flags"
+	if (*pte & PG_W)       sbuf_printf(sb, " Wired");
+	if (*pte & PG_MANAGED) sbuf_printf(sb, " Managed");
+
 	sbuf_printf(sb, " )\n");
 
 	{
@@ -326,6 +331,11 @@ sysctl_dump_pde(struct sbuf *sb, pd_entry_t *pd, int index)
         }
 
 	if (*pde & PG_NX)     sbuf_printf(sb, " ExecuteDisable");
+
+	// "pseudo flags"
+	if (*pde & PG_W)       sbuf_printf(sb, " Wired");
+	if (*pde & PG_MANAGED) sbuf_printf(sb, " Managed");
+
 	sbuf_printf(sb, " )\n");
 
 	if (*pde & PG_PS) {
@@ -390,6 +400,11 @@ sysctl_dump_pdpte(struct sbuf *sb, pdp_entry_t *pdpt, int index)
         }
 
 	if (*pdpte & PG_NX)     sbuf_printf(sb, " ExecuteDisable");
+
+	// "pseudo flags"
+	if (*pdpte & PG_W)       sbuf_printf(sb, " Wired");
+	if (*pdpte & PG_MANAGED) sbuf_printf(sb, " Managed");
+
 	sbuf_printf(sb, " )\n");
 
 	if (*pdpte & PG_PS) {
@@ -491,6 +506,79 @@ sysctl_dump_pmap(SYSCTL_HANDLER_ARGS)
 	}
 
 	sbuf_printf(sb, "pmap of pid %d (virtual address 0x%016lx):\n", vm_pid_to_dump_pmap, vm_pointer_to_dump_pmap);
+
+	{
+		uint64_t cr0, cr3, cr4, ia32_efer;
+		unsigned int cpuid_val[4];
+
+		cr0 = rcr0();
+		cr3 = rcr3();
+		cr4 = rcr4();
+		ia32_efer = rdmsr(MSR_EFER);
+		do_cpuid(0x80000001, cpuid_val);
+
+
+		sbuf_printf(sb, "    CR0: 0x%016lx (", cr0);
+
+		if (cr0 & (1<<31)) sbuf_printf(sb, " Paging");
+		else sbuf_printf(sb, " ~Paging");
+
+		if (cr0 & (1<<0))  sbuf_printf(sb, " ProtectionEnable");
+		else sbuf_printf(sb, " ~ProtectionEnable");
+
+		sbuf_printf(sb, " )\n");
+
+
+		sbuf_printf(sb, "    CR3: 0x%016lx (", cr3);
+
+		if (cr3 & (1<<4)) sbuf_printf(sb, " PageLevelCacheDisable");
+		else sbuf_printf(sb, " ~PageLevelCacheDisable");
+
+		if (cr3 & (1<<3)) sbuf_printf(sb, " PageLevelWriteThrough");
+		else sbuf_printf(sb, " ~PageLevelWriteThrough");
+
+		sbuf_printf(sb, " )\n");
+
+
+		sbuf_printf(sb, "    CR4: 0x%016lx (", cr4);
+
+		if (cr4 & (1<<4)) sbuf_printf(sb, " PageSizeExtensions");
+		else sbuf_printf(sb, " ~PageSizeExtensions");
+
+		if (cr4 & (1<<5)) sbuf_printf(sb, " PhysicalAddressExtension");
+		else sbuf_printf(sb, " ~PhysicalAddressExtension");
+
+		if (cr4 & (1<<7)) sbuf_printf(sb, " PageGlobalEnable");
+		else sbuf_printf(sb, " ~PageGlobalEnable");
+
+		if (cr4 & (1<<17)) sbuf_printf(sb, " PCIDEnable");
+		else sbuf_printf(sb, " ~PCIDEnable");
+
+		sbuf_printf(sb, " )\n");
+
+
+		sbuf_printf(sb, "    MSR IA32_EFER: 0x%016lx (", ia32_efer);
+
+		if (ia32_efer & (1<<8)) sbuf_printf(sb, " IA32eModeEnable");
+		else sbuf_printf(sb, " ~IA32eModeEnable");
+
+		if (ia32_efer & (1<<10)) sbuf_printf(sb, " IA32eModeActive");
+		else sbuf_printf(sb, " ~IA32eModeActive");
+
+		sbuf_printf(sb, " )\n");
+
+
+		sbuf_printf(sb, "    CPUID 0x80000001:\n");
+		sbuf_printf(sb, "        eax=0x%08x\n", cpuid_val[0]);
+		sbuf_printf(sb, "        ebx=0x%08x\n", cpuid_val[1]);
+		sbuf_printf(sb, "        ecx=0x%08x\n", cpuid_val[2]);
+		sbuf_printf(sb, "        edx=0x%08x (", cpuid_val[3]);
+
+		if (cpuid_val[3] & (1<<26)) sbuf_printf(sb, " Page1GB");
+		else sbuf_printf(sb, " ~Page1GB");
+
+		sbuf_printf(sb, " )\n");
+	}
 
 	PMAP_LOCK(&p->p_vmspace->vm_pmap);
 
