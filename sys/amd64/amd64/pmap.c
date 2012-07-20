@@ -1420,7 +1420,7 @@ pmap_add_delayed_free_list(vm_page_t m, vm_page_t *free, boolean_t set_PG_ZERO)
 	m->right = *free;
 	*free = m;
 }
-	
+
 /*
  * Inserts the specified page table page into the specified pmap's collection
  * of idle page table pages.  Each of a pmap's page table pages is responsible
