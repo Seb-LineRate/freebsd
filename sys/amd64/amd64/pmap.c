@@ -2046,7 +2046,7 @@ pmap_add_delayed_free_list(vm_page_t m, struct spglist *free,
 		m->flags &= ~PG_ZERO;
 	SLIST_INSERT_HEAD(free, m, plinks.s.ss);
 }
-	
+
 /*
  * Inserts the specified page table page into the specified pmap's collection
  * of idle page table pages.  Each of a pmap's page table pages is responsible
