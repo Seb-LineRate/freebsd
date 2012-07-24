@@ -120,6 +120,7 @@ void		 pmap_enter_object(pmap_t pmap, vm_offset_t start,
 		    vm_offset_t end, vm_page_t m_start, vm_prot_t prot);
 void		 pmap_enter_quick(pmap_t pmap, vm_offset_t va, vm_page_t m,
 		    vm_prot_t prot);
+void		 pmap_enter_object_1gb(pmap_t pmap, vm_offset_t va_start, vm_page_t m_start, vm_prot_t prot);
 vm_paddr_t	 pmap_extract(pmap_t pmap, vm_offset_t va);
 vm_page_t	 pmap_extract_and_hold(pmap_t pmap, vm_offset_t va,
 		    vm_prot_t prot);
