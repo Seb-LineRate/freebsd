@@ -4029,6 +4029,163 @@ pmap_enter_object(pmap_t pmap, vm_offset_t start, vm_offset_t end,
 	PMAP_UNLOCK(pmap);
 }
 
+// like pmap_enter_object(), but doesn't check the reservation level...
+// and it takes a gig of ram at a time (contiguous and 1gb-aligned), not 4k
+void
+pmap_enter_object_1gb(
+    pmap_t pmap,
+    vm_offset_t va_start,
+    vm_page_t m_start,
+    vm_prot_t prot
+) {
+	vm_offset_t va;
+	vm_page_t m;
+
+	int i;
+
+	const int num_4k_pages = (NBPDP / PAGE_SIZE);
+	const int num_2m_pages = (NBPDP / NBPDR);
+
+	KASSERT(
+		(va_start % (1024 * 1024 * 1024)) == 0,
+		("pmap_enter_object_1gb: start VA 0x%016lx is not on a 1 GB boundary", va_start)
+	);
+
+	// verify that the array of pages we got from vm_phys_alloc_contig()
+	// is aligned on a 1 GB boundary
+	KASSERT(
+		(m_start->phys_addr % (1024*1024*1024)) == 0,
+		("pmap_enter_object_1gb: start page is not aligned on a 1 GB boundary!");
+	);
+
+
+#ifdef INVARIANTS
+	//
+	// verify that all the pages are in order and physically contiguous
+	//
+	for (i = 1; i < num_4k_pages; i++) {
+		vm_page_t m_tmp = &m_start[i];
+		vm_page_t m_prev = &m_start[i-1];
+
+		KASSERT(
+			m_tmp->phys_addr == (m_prev->phys_addr + PAGE_SIZE),
+			(
+				"pmap_enter_object_1gb: page (pindex=%ld, phys_addr=0x%016lx) not contiguous with previous page!",
+				m_tmp->pindex,
+				m_tmp->phys_addr
+			)
+		);
+	}
+#endif
+
+
+	VM_OBJECT_LOCK_ASSERT(m_start->object, MA_OWNED);
+	PMAP_LOCK(pmap);
+
+
+	//
+	// we do this round-about process to pre-fill the pmap cache with
+	// valid lesser page-map pages
+	//
+
+
+	//
+	// enter a gig's worth of 4kB pages
+	//
+
+	for (i = 0; i < num_4k_pages; i ++) {
+		pt_entry_t *pte;
+
+		va = va_start + (i * PAGE_SIZE);
+		m = &m_start[i];
+
+		pmap_enter_quick_locked(pmap, va, m, prot, NULL);
+
+		// set the PTE's Accessed bit, this is required for promotion to 2MB pages later
+		pte = pmap_pte(pmap, va);
+		KASSERT(
+			pte != NULL,
+			(
+				"pmap: no PTE found for just-entered 4k page at VA (pmap=%p, va=0x%016lx, m=%p)",
+				pmap,
+				va,
+				m
+			)
+		);
+		KASSERT(
+			(*pte & PG_V) == PG_V,
+			(
+				"pmap: invalid PTE for just-entered 4k page at VA (pmap=%p, va=0x%016lx, m=%p)",
+				pmap,
+				va,
+				m
+			)
+		);
+
+		// set the Wired bit, this is bogus?
+		*pte |= PG_W;
+
+		// set the PTE's Modified (aka Dirty) bit, this is needed for demotion later
+		*pte |= PG_M;
+
+		// set the PTE's Accessed bit, this is required for promotion to 2MB pages later
+		*pte |= PG_A;
+	}
+
+
+	//
+	// promote all those 4kB pages to 2MB pages
+	//
+
+	for (i = 0; i < num_2m_pages; i ++) {
+		pd_entry_t *pde;
+
+		va = va_start + (i * NBPDR);
+
+		pde = pmap_pde(pmap, va);
+		KASSERT(pde != NULL, ("pmap_enter_object_1gb: got a NULL PDE after entering 4k pages!"));
+		KASSERT((*pde & PG_V) == PG_V, ("pmap_enter_object_1gb: got an invalid PDE after entering 4k pages!"));
+		KASSERT((*pde & PG_PS) != PG_PS, ("pmap_enter_object_1gb: got a PDE with PS after entering 4k pages!"));
+		pmap_promote_pde(pmap, pde, va);
+
+		// set the PDE's Read/Write bit, this prevents immediate demotion on the first write
+		*pde |= PG_RW;
+
+		// set the PDE's Modified (aka Dirty) bit, this is needed for demotion later
+		*pde |= PG_M;
+
+		// set the PDE's Accessed bit, this is required for promotion to 1GB pages later
+		*pde |= PG_A;
+	}
+
+
+	//
+	// if 1 gig pages are supported, promote all those 2MB pages to
+	// one 1GB page
+	//
+
+	if ((amd_feature & AMDID_PAGE1GB) == AMDID_PAGE1GB) {
+		pdp_entry_t *pdpe;
+
+		va = va_start;
+
+		pdpe = pmap_pdpe(pmap, va);
+		KASSERT(pdpe != NULL, ("pmap_enter_object_1gb: got a NULL PDPE after promoting to 2 meg pages!"));
+		KASSERT((*pdpe & PG_V) == PG_V, ("pmap_enter_object_1gb: got an invalid PDPE after promoting to 2 meg pages!"));
+		KASSERT((*pdpe & PG_PS) != PG_PS, ("pmap_enter_object_1gb: got a PDPE with PS after promoting to 2 meg pages!"));
+		pmap_promote_pdpe(pmap, pdpe, va);
+
+		// set the PDPE's Read/Write bit, this prevents immediate demotion on the first write
+		*pdpe |= PG_RW;
+
+		// set the PDPE's Modified (aka Dirty) bit, this is needed for demotion later
+		*pdpe |= PG_M;
+	}
+
+
+	PMAP_UNLOCK(pmap);
+}
+
 /*
  * this code makes some *MAJOR* assumptions:
  * 1. Current pmap & pmap exists.
