@@ -3350,6 +3350,12 @@ pmap_pv_demote_pdpe(pmap_t pmap, vm_offset_t va, vm_paddr_t pa,
 	vm_offset_t va_last;
 	// int bit, field;
 
+	// FIXME: this can not end well...  :-(
+	if (pmap == kernel_pmap) {
+		printf("pmap_pv_demote_pdpe() skipping PV demotion in kernel pmap...\n");
+		return;
+	}
+
 	rw_assert(&pvh_global_lock, RA_LOCKED);
 	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
 	KASSERT((pa & PDPMASK) == 0,
