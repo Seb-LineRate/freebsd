@@ -3507,6 +3507,11 @@ pmap_remove_pde(pmap_t pmap, pd_entry_t *pdq, vm_offset_t sva,
 
 /*
  * pmap_remove_pte: do the things to unmap a page in a process
+ *     pmap is the pmap that we're modifying
+ *     ptq is a pointer to the PTE of the page we're unmapping
+ *     va is the virtual address being unmapped
+ *     ptepde is the PDE of the page we're unmapping
+ *     free is the head of a TAILQ of vm_pages to be freed(?)
  */
 static int
 pmap_remove_pte(pmap_t pmap, pt_entry_t *ptq, vm_offset_t va, 
