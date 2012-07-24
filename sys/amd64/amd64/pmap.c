@@ -288,6 +288,7 @@ static void pmap_update_pde(pmap_t pmap, vm_offset_t va, pd_entry_t *pde,
     pd_entry_t newpde);
 static void pmap_update_pde_invalidate(vm_offset_t va, pd_entry_t newpde);
 
+static vm_page_t pmap_alloc_pdpe(pmap_t pmap, vm_offset_t va, int flags) __attribute__((unused));
 static vm_page_t pmap_allocpde(pmap_t pmap, vm_offset_t va, int flags);
 static vm_page_t pmap_allocpte(pmap_t pmap, vm_offset_t va, int flags);
 
@@ -1959,6 +1960,37 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
 	pmap_resident_count_inc(pmap, 1);
 
 	return (m);
+}
+
+// find the PDPT for a virtual address (within a particular pmap)
+// allocates a new PDPT if needed (in which case it also creates the PML4E pointing to this new PDPT)
+// returns a pointer to the vm_page holding the PDPT
+static vm_page_t
+pmap_alloc_pdpe(pmap_t pmap, vm_offset_t va, int flags)
+{
+	vm_pindex_t pindex;
+	pml4_entry_t *pml4e;
+	vm_page_t pdpt_pg;
+
+	KASSERT((flags & (M_NOWAIT | M_WAITOK)) == M_NOWAIT ||
+	    (flags & (M_NOWAIT | M_WAITOK)) == M_WAITOK,
+	    ("pmap_alloc_pdpe: flags is neither M_NOWAIT nor M_WAITOK"));
+
+retry:
+	pml4e = pmap_pml4e(pmap, va);
+	if ((*pml4e & PG_V) == PG_V) {
+		/* Add a reference to the page the pdpt lives on. */
+		pdpt_pg = PHYS_TO_VM_PAGE(*pml4e & PG_FRAME);
+		pdpt_pg->wire_count++;
+	} else {
+		// the PML4 entry for that virtual address is not valid, so no PDPT exists
+		// allocate and initialize a page to hold the PDP table, and update the PML4E to point to it
+		pindex = pmap_pml4e_index(va);
+		pdpt_pg = _pmap_allocpte(pmap, pindex + (NUPDE + NUPDPE), (flags & (M_NOWAIT | M_WAITOK)));
+		if (pdpt_pg == NULL && (flags & M_WAITOK))
+			goto retry;
+	}
+	return (pdpt_pg);
 }
 
 static vm_page_t
