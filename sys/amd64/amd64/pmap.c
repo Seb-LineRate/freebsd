@@ -5628,6 +5628,9 @@ pmap_remove_pages(pmap_t pmap)
 		for (field = 0; field < _NPCM; field++) {
 			inuse = ~pc->pc_map[field] & pc_freemask[field];
 			while (inuse != 0) {
+				int number_of_4k_pages;
+				int pte_is_pdpe = 0;
+
 				bit = bsfq(inuse);
 				bitmask = 1UL << bit;
 				idx = field * 64 + bit;
@@ -5635,13 +5638,14 @@ pmap_remove_pages(pmap_t pmap)
 				inuse &= ~bitmask;
 
 				pte = pmap_pdpe(pmap, pv->pv_va);
+				KASSERT(pte != NULL, ("pmap_remove_pages: got a NULL PDPE!"));
+				KASSERT((*pte & PG_V) == PG_V, ("pmap_remove_pages: got an invalid PDPE!"));
 				ptepde = *pte;
-				if ((*pte & PG_V) == 0) {
-					panic("bad pdpe");
-				}
 
 				if ((*pte & PG_PS) == PG_PS) {
 					tpte = *pte;
+					number_of_4k_pages = NBPDP / PAGE_SIZE;
+					pte_is_pdpe = 1;
 				} else {
 					pte = pmap_pdpe_to_pde(pte, pv->pv_va);
 					tpte = *pte;
@@ -5651,6 +5655,7 @@ pmap_remove_pages(pmap_t pmap)
 						pte = (pt_entry_t *)PHYS_TO_DMAP(tpte &
 						    PG_FRAME);
 						pte = &pte[pmap_pte_index(pv->pv_va)];
+						number_of_4k_pages = 1;
 						tpte = *pte;
 					} else {
 						/*
@@ -5663,6 +5668,7 @@ pmap_remove_pages(pmap_t pmap)
 						 * regular page could be mistaken for
 						 * a superpage.
 						 */
+						number_of_4k_pages = NBPDR / PAGE_SIZE;
 						superpage = TRUE;
 					}
 
@@ -5702,11 +5708,9 @@ pmap_remove_pages(pmap_t pmap)
 				 * Update the vm_page_t clean/reference bits.
 				 */
 				if ((tpte & (PG_M | PG_RW)) == (PG_M | PG_RW)) {
-					if (superpage) {
-						for (mt = m; mt < &m[NBPDR / PAGE_SIZE]; mt++)
-							vm_page_dirty(mt);
-					} else
-						vm_page_dirty(m);
+					for (mt = m; mt < &m[number_of_4k_pages]; mt++) {
+						vm_page_dirty(mt);
+					}
 				}
 
 				CHANGE_PV_LIST_LOCK_TO_VM_PAGE(&lock, m);
@@ -5714,19 +5718,31 @@ pmap_remove_pages(pmap_t pmap)
 				/* Mark free */
 				pc->pc_map[field] |= bitmask;
 				if (superpage) {
-					pmap_resident_count_dec(pmap, NBPDR / PAGE_SIZE);
-					pvh = pa_2mb_to_pvh(tpte & PG_PS_FRAME);
+					pmap_resident_count_dec(pmap, number_of_4k_pages);
+					if (pte_is_pdpe) {
+						pvh = pa_1gb_to_pvh(tpte & PG_1GB_PS_FRAME);
+					} else {
+						pvh = pa_2mb_to_pvh(tpte & PG_PS_FRAME);
+					}
 					TAILQ_REMOVE(&pvh->pv_list, pv, pv_next);
 					pvh->pv_gen++;
 					if (TAILQ_EMPTY(&pvh->pv_list)) {
-						for (mt = m; mt < &m[NBPDR / PAGE_SIZE]; mt++)
+						for (mt = m; mt < &m[number_of_4k_pages]; mt++)
 							if ((mt->aflags & PGA_WRITEABLE) != 0 &&
 							    TAILQ_EMPTY(&mt->md.pv_list))
 								vm_page_aflag_clear(mt, PGA_WRITEABLE);
 					}
-					mpte = pmap_lookup_pt_page(pmap, pv->pv_va);
+					if (pte_is_pdpe) {
+						mpte = pmap_lookup_pd_page(pmap, pv->pv_va);
+					} else {
+				                mpte = pmap_lookup_pt_page(pmap, pv->pv_va);
+					}
 					if (mpte != NULL) {
-						pmap_remove_pt_page(pmap, mpte);
+						if (pte_is_pdpe) {
+							pmap_remove_pd_page(pmap, mpte);
+						} else {
+							pmap_remove_pt_page(pmap, mpte);
+						}
 						pmap_resident_count_dec(pmap, 1);
 						KASSERT(mpte->wire_count == NPTEPG,
 						    ("pmap_remove_pages: pte page wire count error"));
@@ -5742,11 +5758,12 @@ pmap_remove_pages(pmap_t pmap)
 					    TAILQ_EMPTY(&m->md.pv_list) &&
 					    (m->flags & PG_FICTITIOUS) == 0) {
 						pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
-						if (TAILQ_EMPTY(&pvh->pv_list))
+						if (TAILQ_EMPTY(&pvh->pv_list)) {
                                                         pvh = pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m));
-                                                        if (TAILQ_EMPTY(&pvh->pv_list)) {
+							if (TAILQ_EMPTY(&pvh->pv_list)) {
 								vm_page_aflag_clear(m, PGA_WRITEABLE);
-                                                        }
+							}
+						}
 					}
 				}
 				pmap_unuse_pt(pmap, pv->pv_va, ptepde, &free);
