@@ -2535,7 +2535,7 @@ pmap_demote_pde(pmap_t pmap, pd_entry_t *pde, vm_offset_t va)
 	else {
 		KASSERT((oldpde & PG_W) == 0,
 		    ("pmap_demote_pde: page table page for a wired mapping"
-		    " is missing"));
+		    " is missing (pmap=%p, pde=0x%016lx, va=0x%016lx)", pmap, *pde, va));
 
 		/*
 		 * Invalidate the 2MB page mapping and return "failure" if the
