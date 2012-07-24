@@ -2622,6 +2622,9 @@ pmap_pv_demote_pdpe(pmap_t pmap, vm_offset_t va, vm_paddr_t pa)
 	pv_entry_t pv;
 	vm_offset_t va_last;
 
+	// this can not end well...  :-(
+	if (pmap == kernel_pmap) return;
+
 	rw_assert(&pvh_global_lock, RA_WLOCKED);
 	KASSERT((pa & PDPMASK) == 0,
 	    ("pmap_pv_demote_pdpe: pa is not 1gpage aligned"));
