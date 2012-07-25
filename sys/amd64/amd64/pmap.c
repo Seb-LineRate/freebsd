@@ -240,6 +240,7 @@ static pv_entry_t get_pv_entry(pmap_t pmap, boolean_t try);
 static void	pmap_pv_demote_pde(pmap_t pmap, vm_offset_t va, vm_paddr_t pa);
 static boolean_t pmap_pv_insert_pde(pmap_t pmap, vm_offset_t va, vm_paddr_t pa);
 static void	pmap_pv_promote_pde(pmap_t pmap, vm_offset_t va, vm_paddr_t pa);
+static void	pmap_pv_demote_pdpe(pmap_t pmap, vm_offset_t va, vm_paddr_t pa);
 static void	pmap_pvh_free(struct md_page *pvh, pmap_t pmap, vm_offset_t va);
 static pv_entry_t pmap_pvh_remove(struct md_page *pvh, pmap_t pmap,
 		    vm_offset_t va);
@@ -280,6 +281,7 @@ static void pmap_remove_page(pmap_t pmap, vm_offset_t va, pd_entry_t *pde,
 static void pmap_remove_entry(struct pmap *pmap, vm_page_t m,
 		vm_offset_t va);
 static void pmap_insert_entry(pmap_t pmap, vm_offset_t va, vm_page_t m);
+static void pmap_insert_2mb_entry(pmap_t pmap, vm_offset_t va, vm_paddr_t pa);
 static boolean_t pmap_try_insert_pv_entry(pmap_t pmap, vm_offset_t va,
     vm_page_t m);
 static void pmap_update_pde(pmap_t pmap, vm_offset_t va, pd_entry_t *pde,
@@ -2514,6 +2516,44 @@ pmap_pv_demote_pde(pmap_t pmap, vm_offset_t va, vm_paddr_t pa)
 	} while (va < va_last);
 }
 
+
+/*
+ * After demotion from a 1GB page mapping to 512 2MB page mappings,
+ * destroy the pv entry for the 1GB page mapping and reinstantiate the pv
+ * entries for each of the 2MB page mappings.
+ */
+static void
+pmap_pv_demote_pdpe(pmap_t pmap, vm_offset_t va, vm_paddr_t pa)
+{
+	struct md_page *pvh_1gb;
+	struct md_page *pvh_2mb;
+	pv_entry_t pv;
+	vm_offset_t va_last;
+
+	rw_assert(&pvh_global_lock, RA_WLOCKED);
+	KASSERT((pa & PDPMASK) == 0,
+	    ("pmap_pv_demote_pdpe: pa is not 1gpage aligned"));
+
+	/*
+	 * Transfer the 1gpage's pv entry for this mapping to the first
+	 * page's pv list.
+	 */
+	pvh_1gb = pa_1gb_to_pvh(pa);
+	va = trunc_1gpage(va);
+	pv = pmap_pvh_remove(pvh_1gb, pmap, va);
+	KASSERT(pv != NULL, ("pmap_pv_demote_pdpe: pv not found"));
+
+	pvh_2mb = pa_2mb_to_pvh(pa);
+	TAILQ_INSERT_TAIL(&pvh_2mb->pv_list, pv, pv_list);
+	/* Instantiate the remaining NPTEPG - 1 pv entries. */
+	va_last = va + NBPDP - NBPDR;
+	do {
+		va += NBPDR;
+		pa += NBPDR;
+		pmap_insert_2mb_entry(pmap, va, pa);
+	} while (va < va_last);
+}
+
 /*
  * After promotion from 512 4KB page mappings to a single 2MB page mapping,
  * replace the many pv entries for the 4KB page mappings by a single pv entry
@@ -2600,6 +2640,24 @@ pmap_insert_entry(pmap_t pmap, vm_offset_t va, vm_page_t m)
 	pv = get_pv_entry(pmap, FALSE);
 	pv->pv_va = va;
 	TAILQ_INSERT_TAIL(&m->md.pv_list, pv, pv_list);
+}
+
+/*
+ * Create a pv entry for 2mb page at pa for
+ * (pmap, va).
+ */
+static void
+pmap_insert_2mb_entry(pmap_t pmap, vm_offset_t va, vm_paddr_t pa)
+{
+	pv_entry_t pv;
+	struct md_page *pvh_2mb;
+
+	rw_assert(&pvh_global_lock, RA_WLOCKED);
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	pvh_2mb = pa_2mb_to_pvh(pa);
+	pv = get_pv_entry(pmap, FALSE);
+	pv->pv_va = va;
+	TAILQ_INSERT_TAIL(&pvh_2mb->pv_list, pv, pv_list);
 }
 
 /*
@@ -4973,15 +5031,24 @@ pmap_demote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va)
 	oldpdpe = *pdpe;
 	KASSERT((oldpdpe & (PG_PS | PG_V)) == (PG_PS | PG_V),
 	    ("pmap_demote_pdpe: oldpdpe is missing PG_PS and/or PG_V"));
-	if ((mpde = vm_page_alloc(NULL, va >> PDPSHIFT, VM_ALLOC_INTERRUPT |
-	    VM_ALLOC_NOOBJ | VM_ALLOC_WIRED)) == NULL) {
-		CTR2(KTR_PMAP, "pmap_demote_pdpe: failure for va %#lx"
-		    " in pmap %p", va, pmap);
-		return (FALSE);
+
+	// look for a PD page in the pmap's cache
+	// allocate a new vm_page to hold the new PD if none is found in the cache
+	mpde = pmap_lookup_pd_page(pmap, va);
+	if (mpde == NULL) {
+		if ((mpde = vm_page_alloc(NULL, va >> PDPSHIFT, VM_ALLOC_INTERRUPT |
+			VM_ALLOC_NOOBJ | VM_ALLOC_WIRED)) == NULL) {
+			CTR2(KTR_PMAP, "pmap_demote_pdpe: failure for va %#lx"
+				" in pmap %p", va, pmap);
+			return (FALSE);
+		}
+	} else {
+		pmap_remove_pd_page(pmap, mpde);
 	}
+
 	mpdepa = VM_PAGE_TO_PHYS(mpde);
 	firstpde = (pd_entry_t *)PHYS_TO_DMAP(mpdepa);
-	newpdpe = mpdepa | PG_M | PG_A | (oldpdpe & PG_U) | PG_RW | PG_V;
+	newpdpe = mpdepa | PG_M | PG_A | (oldpdpe & PG_U) | PG_RW | PG_V | (oldpdpe & PG_W);
 	KASSERT((oldpdpe & PG_A) != 0,
 	    ("pmap_demote_pdpe: oldpdpe is missing PG_A"));
 	KASSERT((oldpdpe & (PG_M | PG_RW)) != PG_RW,
@@ -5002,9 +5069,15 @@ pmap_demote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va)
 	*pdpe = newpdpe;
 
 	/*
+	 * Demote the pv entry.
+	 */
+	if ((oldpdpe & PG_MANAGED) != 0)
+		pmap_pv_demote_pdpe(pmap, va, oldpdpe & PG_1GB_PS_FRAME);
+
+	/*
 	 * Invalidate a stale recursive mapping of the page directory page.
 	 */
-	pmap_invalidate_page(pmap, (vm_offset_t)vtopde(va));
+	pmap_invalidate_page(pmap, (vm_offset_t)vtopdpe(va));
 
 	pmap_pdpe_demotions++;
 	CTR2(KTR_PMAP, "pmap_demote_pdpe: success for va %#lx"
