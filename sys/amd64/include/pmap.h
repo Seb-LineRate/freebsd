@@ -87,6 +87,9 @@
 #define	PG_PTE_PROMOTE	(PG_NX | PG_MANAGED | PG_W | PG_G | PG_PTE_PAT | \
 	    PG_M | PG_A | PG_NC_PCD | PG_NC_PWT | PG_U | PG_RW | PG_V)
 
+#define	PG_PDE_PROMOTE	(PG_NX | PG_MANAGED | PG_W | PG_G | \
+	    PG_M | PG_A | PG_NC_PCD | PG_NC_PWT | PG_U | PG_RW | PG_V)
+
 /*
  * Page Protection Exception bits
  */
