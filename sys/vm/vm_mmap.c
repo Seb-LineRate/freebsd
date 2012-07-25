@@ -200,6 +200,8 @@ sys_mmap(td, uap)
 	struct vmspace *vms = td->td_proc->p_vmspace;
 	cap_rights_t rights;
 
+        uintptr_t page_mask;
+
 	addr = (vm_offset_t) uap->addr;
 	size = uap->len;
 	prot = uap->prot & VM_PROT_ALL;
@@ -222,16 +224,32 @@ sys_mmap(td, uap)
 		pos = 0;
 	}
 
+	/* Figure out page size */
+	if (flags & MAP_1GB_PAGE) {
+                if ((size % (1024 * 1024 * 1024)) != 0) {
+                    return EINVAL;
+                }
+                if ((pos % (1024 * 1024 * 1024)) != 0) {
+                    return EINVAL;
+                }
+		page_mask = PDPMASK;
+	} else {
+		page_mask = PAGE_MASK;
+	}
+
 	/*
 	 * Align the file position to a page boundary,
 	 * and save its page offset component.
 	 */
-	pageoff = (pos & PAGE_MASK);
+	// FIXME: the mmap(2) manpage says pos is ignored on MAP_ANON mappings
+	pageoff = (pos & page_mask);
 	pos -= pageoff;
 
 	/* Adjust size for rounding (on both ends). */
-	size += pageoff;			/* low end... */
-	size = (vm_size_t) round_page(size);	/* hi end */
+	size += pageoff;			/* low end... */  // FIXME: why do we need this?  we just moved pos down to the beginning of the page...
+	if (0 == (flags & MAP_1GB_PAGE)) {
+            size = (vm_size_t) round_page(size);	/* hi end */
+        }
 
 	/*
 	 * Check for illegal addresses.  Watch out for address wrap... Note
@@ -1487,7 +1505,12 @@ vm_mmap(vm_map_t map, vm_offset_t *addr, vm_size_t size, vm_prot_t prot,
 
 	if ((flags & MAP_FIXED) == 0) {
 		fitit = TRUE;
-		*addr = round_page(*addr);
+                // FIXME: not sure if this is the best place to do this
+                if (flags & MAP_1GB_PAGE) {
+                    *addr = round_1gpage(*addr);
+                } else {
+                    *addr = round_page(*addr);
+                }
 	} else {
 		if (*addr != trunc_page(*addr))
 			return (EINVAL);
@@ -1562,12 +1585,24 @@ vm_mmap(vm_map_t map, vm_offset_t *addr, vm_size_t size, vm_prot_t prot,
 	if (rv == KERN_SUCCESS) {
 		/*
 		 * If the process has requested that all future mappings
-		 * be wired, then heed this.
+		 * be wired, then heed this.  Or if the process requested a 1 GB
+		 * superpage, then wire it now.
 		 */
-		if (map->flags & MAP_WIREFUTURE) {
-			vm_map_wire(map, *addr, *addr + size,
-			    VM_MAP_WIRE_USER | ((flags & MAP_STACK) ?
-			    VM_MAP_WIRE_HOLESOK : VM_MAP_WIRE_NOHOLES));
+		if ((map->flags & MAP_WIREFUTURE) || (flags & MAP_1GB_PAGE)) {
+                        int wire_flags;
+                        wire_flags = VM_MAP_WIRE_USER;
+                        if (flags & MAP_STACK) {
+                            wire_flags |= VM_MAP_WIRE_HOLESOK;
+                        } else {
+                            wire_flags |= VM_MAP_WIRE_NOHOLES;
+                        }
+                        if (flags & MAP_1GB_PAGE) {
+				wire_flags |= VM_MAP_WIRE_1GB_PAGE;
+				rv = vm_map_wire(map, *addr, *addr + size, wire_flags);
+			} else {
+				// FIXME: upstream looses the result of vm_map_wire()
+				vm_map_wire(map, *addr, *addr + size, wire_flags);
+			}
 		}
 	} else {
 		/*
@@ -1593,7 +1628,6 @@ vm_mmap(vm_map_t map, vm_offset_t *addr, vm_size_t size, vm_prot_t prot,
 int
 vm_mmap_to_errno(int rv)
 {
-
 	switch (rv) {
 	case KERN_SUCCESS:
 		return (0);

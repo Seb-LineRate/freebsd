@@ -228,6 +228,18 @@ region.
 Modifications are private.
 .It Dv MAP_SHARED
 Modifications are shared.
+.It Dv MAP_1GB_PAGE
+Request that memory be backed by 1 GB superpages if possible.
+.Fa len
+must be an integer multiple of 1 GB.  This flag only works with
+MAP_ANON and MAP_PRIVATE.  The memory returned will be locked (as
+per
+.Fn mlock
+), though this behavior may change in the future.  Explicitly call
+.Fn mlock
+if this behavior is important to you (you may have to increase the sysctl
+vm.max_wired).  On hardware that does not support 1 GB pages, one of the
+supported page sizes will be used instead.
 .It Dv MAP_STACK
 .Dv MAP_STACK
 implies
