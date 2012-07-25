@@ -169,6 +169,10 @@ __FBSDID("$FreeBSD$");
 #define	pa_2mb_index(pa)	((pa) >> PDRSHIFT)
 #define	pa_2mb_to_pvh(pa)	(&pv_2mb_table[pa_2mb_index(pa)])
 
+// for accessing the 1GB PV mappings
+#define	pa_1gb_index(pa)	((pa) >> PDPSHIFT)
+#define	pa_1gb_to_pvh(pa)	(&pv_1gb_table[pa_1gb_index(pa)])
+
 struct pmap kernel_pmap_store;
 
 vm_offset_t virtual_avail;	/* VA of first avail page (after kernel bss) */
@@ -217,6 +221,7 @@ static struct {
 static TAILQ_HEAD(pch, pv_chunk) pv_chunks = TAILQ_HEAD_INITIALIZER(pv_chunks);
 static long pv_entry_count;
 static struct md_page *pv_2mb_table;
+static struct md_page *pv_1gb_table;
 
 /*
  * All those kernel PT submaps that BSD is so fond of
@@ -749,7 +754,7 @@ pmap_init(void)
 {
 	vm_page_t mpte;
 	vm_size_t s;
-	int i, pv_npg;
+	int i, pv_npg_2mb, pv_npg_1gb;
 
 	/*
 	 * Initialize the vm page array entries for the kernel pmap's
@@ -784,19 +789,31 @@ pmap_init(void)
 	}
 
 	/*
-	 * Calculate the size of the pv head table for 2MB superpages.
+	 * Calculate the size of the pv head tables for 2MB and
+	 * 1GB superpages.
 	 */
 	for (i = 0; phys_avail[i + 1]; i += 2);
-	pv_npg = round_2mpage(phys_avail[(i - 2) + 1]) / NBPDR;
+	pv_npg_2mb = round_2mpage(phys_avail[(i - 2) + 1]) / NBPDR;
+	pv_npg_1gb = round_1gpage(phys_avail[(i - 2) + 1]) / NBPDP;
 
 	/*
 	 * Allocate memory for the pv head table for 2MB superpages.
 	 */
-	s = (vm_size_t)(pv_npg * sizeof(struct md_page));
+	s = (vm_size_t)(pv_npg_2mb * sizeof(struct md_page));
 	s = round_page(s);
 	pv_2mb_table = (struct md_page *)kmem_alloc(kernel_map, s);
-	for (i = 0; i < pv_npg; i++)
+	for (i = 0; i < pv_npg_2mb; i++)
 		TAILQ_INIT(&pv_2mb_table[i].pv_list);
+
+	/*
+	 * Allocate memory for the pv head table for 1GB superpages.
+	 */
+
+	s = (vm_size_t)(pv_npg_1gb * sizeof(struct md_page));
+	s = round_page(s);
+	pv_1gb_table = (struct md_page *)kmem_alloc(kernel_map, s);
+	for (i = 0; i < pv_npg_1gb; i++)
+		TAILQ_INIT(&pv_1gb_table[i].pv_list);
 }
 
 SYSCTL_NODE(_vm_pmap, OID_AUTO, pde, CTLFLAG_RD, 0,
@@ -2173,8 +2190,11 @@ pmap_pv_reclaim(pmap_t locked_pmap)
 				    (m->flags & PG_FICTITIOUS) == 0) {
 					pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 					if (TAILQ_EMPTY(&pvh->pv_list)) {
-						vm_page_aflag_clear(m,
-						    PGA_WRITEABLE);
+						pvh = pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m));
+						if (TAILQ_EMPTY(&pvh->pv_list)) {
+							vm_page_aflag_clear(m,
+							    PGA_WRITEABLE);
+						}
 					}
 				}
 				pc->pc_map[field] |= 1UL << bit;
@@ -2343,8 +2363,8 @@ retry:
 /*
  * First find and then remove the pv entry for the specified pmap and virtual
  * address from the specified pv list.  Returns the pv entry if found and NULL
- * otherwise.  This operation can be performed on pv lists for either 4KB or
- * 2MB page mappings.
+ * otherwise.  This operation can be performed on pv lists for 4KB or 2MB or
+ * 1GB page mappings.
  */
 static __inline pv_entry_t
 pmap_pvh_remove(struct md_page *pvh, pmap_t pmap, vm_offset_t va)
@@ -2462,8 +2482,12 @@ pmap_remove_entry(pmap_t pmap, vm_page_t m, vm_offset_t va)
 	pmap_pvh_free(&m->md, pmap, va);
 	if (TAILQ_EMPTY(&m->md.pv_list) && (m->flags & PG_FICTITIOUS) == 0) {
 		pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
-		if (TAILQ_EMPTY(&pvh->pv_list))
-			vm_page_aflag_clear(m, PGA_WRITEABLE);
+		if (TAILQ_EMPTY(&pvh->pv_list)) {
+			pvh = pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m));
+			if (TAILQ_EMPTY(&pvh->pv_list)) {
+				vm_page_aflag_clear(m, PGA_WRITEABLE);
+			}
+		}
 	}
 }
 
@@ -2919,6 +2943,7 @@ pmap_remove_all(vm_page_t m)
 	pmap_t pmap;
 	pt_entry_t *pte, tpte;
 	pd_entry_t *pde;
+	pdp_entry_t *pdpe;
 	vm_offset_t va;
 	vm_page_t free;
 
@@ -2928,6 +2953,25 @@ pmap_remove_all(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	if ((m->flags & PG_FICTITIOUS) != 0)
 		goto small_mappings;
+
+	pvh = pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m));
+	while ((pv = TAILQ_FIRST(&pvh->pv_list)) != NULL) {
+		pmap = PV_PMAP(pv);
+		PMAP_LOCK(pmap);
+		va = pv->pv_va;
+		pdpe = pmap_pdpe(pmap, va);
+		if (pdpe == NULL) {
+			panic("pmap_remove_all: NULL PDPE");
+		}
+		if ((*pdpe & PG_V) != PG_V) {
+			panic("pmap_remove_all: invalid PDPE");
+		}
+		if ((*pdpe & PG_PS) == PG_PS) {
+			(void)pmap_demote_pdpe(pmap, pdpe, va);
+		}
+		PMAP_UNLOCK(pmap);
+	}
+
 	pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 	while ((pv = TAILQ_FIRST(&pvh->pv_list)) != NULL) {
 		pmap = PV_PMAP(pv);
@@ -3436,7 +3480,9 @@ validate:
 			if ((origpte & PG_MANAGED) != 0 &&
 			    TAILQ_EMPTY(&om->md.pv_list) &&
 			    ((om->flags & PG_FICTITIOUS) != 0 ||
-			    TAILQ_EMPTY(&pa_2mb_to_pvh(opa)->pv_list)))
+			    (TAILQ_EMPTY(&pa_2mb_to_pvh(opa)->pv_list) &&
+			    TAILQ_EMPTY(&pa_1gb_to_pvh(opa)->pv_list))
+                            ))
 				vm_page_aflag_clear(om, PGA_WRITEABLE);
 			if (invlva)
 				pmap_invalidate_page(pmap, va);
@@ -4105,6 +4151,8 @@ pmap_page_wired_mappings(vm_page_t m)
 	if ((m->flags & PG_FICTITIOUS) == 0) {
 	    count = pmap_pvh_wired_mappings(pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m)),
 	        count);
+	    count += pmap_pvh_wired_mappings(pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m)),
+	        count);
 	}
 	rw_wunlock(&pvh_global_lock);
 	return (count);
@@ -4272,7 +4320,10 @@ pmap_remove_pages(pmap_t pmap)
 					    (m->flags & PG_FICTITIOUS) == 0) {
 						pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 						if (TAILQ_EMPTY(&pvh->pv_list))
-							vm_page_aflag_clear(m, PGA_WRITEABLE);
+                                                        pvh = pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m));
+                                                        if (TAILQ_EMPTY(&pvh->pv_list)) {
+								vm_page_aflag_clear(m, PGA_WRITEABLE);
+                                                        }
 					}
 				}
 				pmap_unuse_pt(pmap, pv->pv_va, ptepde, &free);
@@ -4387,7 +4438,9 @@ pmap_is_referenced(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	rv = pmap_is_referenced_pvh(&m->md) ||
 	    ((m->flags & PG_FICTITIOUS) == 0 &&
-	    pmap_is_referenced_pvh(pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m))));
+	    (pmap_is_referenced_pvh(pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m))) ||
+            pmap_is_referenced_pvh(pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m))))
+            );
 	rw_wunlock(&pvh_global_lock);
 	return (rv);
 }
