@@ -312,6 +312,10 @@ pmap_modified_bit(pmap_t pmap)
 #define	VM_PAGE_TO_PV_LIST_LOCK(m)	\
 			PHYS_TO_PV_LIST_LOCK(VM_PAGE_TO_PHYS(m))
 
+// for accessing the 1GB PV mappings
+#define	pa_1gb_index(pa)	((pa) >> PDPSHIFT)
+#define	pa_1gb_to_pvh(pa)	(&pv_1gb_table[pa_1gb_index(pa)])
+
 struct pmap kernel_pmap_store;
 
 vm_offset_t virtual_avail;	/* VA of first avail page (after kernel bss) */
@@ -357,6 +361,7 @@ static TAILQ_HEAD(pch, pv_chunk) pv_chunks = TAILQ_HEAD_INITIALIZER(pv_chunks);
 static struct mtx pv_chunks_mutex;
 static struct rwlock pv_list_locks[NPV_LIST_LOCKS];
 static struct md_page *pv_2mb_table;
+static struct md_page *pv_1gb_table;
 
 /*
  * All those kernel PT submaps that BSD is so fond of
@@ -1010,7 +1015,7 @@ pmap_init(void)
 {
 	vm_page_t mpte;
 	vm_size_t s;
-	int i, pv_npg;
+	int i, pv_npg_2mb, pv_npg_1gb;
 
 	/*
 	 * Initialize the vm page array entries for the kernel pmap's
@@ -1062,20 +1067,33 @@ pmap_init(void)
 		rw_init(&pv_list_locks[i], "pmap pv list");
 
 	/*
-	 * Calculate the size of the pv head table for 2MB superpages.
+	 * Calculate the size of the pv head tables for 2MB and
+	 * 1GB superpages.
 	 */
 	for (i = 0; phys_avail[i + 1]; i += 2);
-	pv_npg = round_2mpage(phys_avail[(i - 2) + 1]) / NBPDR;
+	pv_npg_2mb = round_2mpage(phys_avail[(i - 2) + 1]) / NBPDR;
+	pv_npg_1gb = round_1gpage(phys_avail[(i - 2) + 1]) / NBPDP;
 
 	/*
 	 * Allocate memory for the pv head table for 2MB superpages.
 	 */
-	s = (vm_size_t)(pv_npg * sizeof(struct md_page));
+	s = (vm_size_t)(pv_npg_2mb * sizeof(struct md_page));
 	s = round_page(s);
 	pv_2mb_table = (struct md_page *)kmem_malloc(kernel_arena, s,
 	    M_WAITOK | M_ZERO);
-	for (i = 0; i < pv_npg; i++)
+	for (i = 0; i < pv_npg_2mb; i++)
 		TAILQ_INIT(&pv_2mb_table[i].pv_list);
+
+	/*
+	 * Allocate memory for the pv head table for 1GB superpages.
+	 */
+
+	s = (vm_size_t)(pv_npg_1gb * sizeof(struct md_page));
+	s = round_page(s);
+	pv_1gb_table = (struct md_page *)kmem_malloc(kernel_arena, s,
+	    M_WAITOK | M_ZERO);
+	for (i = 0; i < pv_npg_1gb; i++)
+		TAILQ_INIT(&pv_1gb_table[i].pv_list);
 
 	mtx_init(&cpage_lock, "cpage", NULL, MTX_DEF);
 	cpage_a = kva_alloc(PAGE_SIZE);
@@ -2822,8 +2840,11 @@ reclaim_pv_chunk(pmap_t locked_pmap, struct rwlock **lockp)
 				    (m->flags & PG_FICTITIOUS) == 0) {
 					pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 					if (TAILQ_EMPTY(&pvh->pv_list)) {
-						vm_page_aflag_clear(m,
-						    PGA_WRITEABLE);
+						pvh = pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m));
+						if (TAILQ_EMPTY(&pvh->pv_list)) {
+							vm_page_aflag_clear(m,
+							    PGA_WRITEABLE);
+						}
 					}
 				}
 				pc->pc_map[field] |= 1UL << bit;
@@ -3092,8 +3113,8 @@ retry:
 /*
  * First find and then remove the pv entry for the specified pmap and virtual
  * address from the specified pv list.  Returns the pv entry if found and NULL
- * otherwise.  This operation can be performed on pv lists for either 4KB or
- * 2MB page mappings.
+ * otherwise.  This operation can be performed on pv lists for 4KB or 2MB or
+ * 1GB page mappings.
  */
 static __inline pv_entry_t
 pmap_pvh_remove(struct md_page *pvh, pmap_t pmap, vm_offset_t va)
@@ -3784,8 +3805,9 @@ pmap_remove_all(vm_page_t m)
 	struct md_page *pvh;
 	pv_entry_t pv;
 	pmap_t pmap;
-	pt_entry_t *pte, tpte, PG_A, PG_M, PG_RW;
+	pt_entry_t *pte, tpte, PG_A, PG_M, PG_RW, PG_V;
 	pd_entry_t *pde;
+	pdp_entry_t *pdpe;
 	vm_offset_t va;
 	struct spglist free;
 
@@ -3795,6 +3817,26 @@ pmap_remove_all(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	if ((m->flags & PG_FICTITIOUS) != 0)
 		goto small_mappings;
+
+	pvh = pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m));
+	while ((pv = TAILQ_FIRST(&pvh->pv_list)) != NULL) {
+		pmap = PV_PMAP(pv);
+		PMAP_LOCK(pmap);
+		PG_V = pmap_valid_bit(pmap);
+		va = pv->pv_va;
+		pdpe = pmap_pdpe(pmap, va);
+		if (pdpe == NULL) {
+			panic("pmap_remove_all: NULL PDPE");
+		}
+		if ((*pdpe & PG_V) != PG_V) {
+			panic("pmap_remove_all: invalid PDPE");
+		}
+		if ((*pdpe & PG_PS) == PG_PS) {
+			(void)pmap_demote_pdpe(pmap, pdpe, va);
+		}
+		PMAP_UNLOCK(pmap);
+	}
+
 	pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 	while ((pv = TAILQ_FIRST(&pvh->pv_list)) != NULL) {
 		pmap = PV_PMAP(pv);
@@ -4351,7 +4393,8 @@ validate:
 				if ((om->aflags & PGA_WRITEABLE) != 0 &&
 				    TAILQ_EMPTY(&om->md.pv_list) &&
 				    ((om->flags & PG_FICTITIOUS) != 0 ||
-				    TAILQ_EMPTY(&pa_2mb_to_pvh(opa)->pv_list)))
+				    (TAILQ_EMPTY(&pa_2mb_to_pvh(opa)->pv_list)
+                                    && TAILQ_EMPTY(&pa_1gb_to_pvh(opa)->pv_list))))
 					vm_page_aflag_clear(om, PGA_WRITEABLE);
 			}
 		} else if ((newpte & PG_M) == 0 && (origpte & (PG_M |
@@ -5261,6 +5304,27 @@ restart:
 				count++;
 			PMAP_UNLOCK(pmap);
 		}
+
+		pvh = pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m));
+		TAILQ_FOREACH(pv, &pvh->pv_list, pv_next) {
+			pmap = PV_PMAP(pv);
+			if (!PMAP_TRYLOCK(pmap)) {
+				md_gen = m->md.pv_gen;
+				pvh_gen = pvh->pv_gen;
+				rw_runlock(lock);
+				PMAP_LOCK(pmap);
+				rw_rlock(lock);
+				if (md_gen != m->md.pv_gen ||
+				    pvh_gen != pvh->pv_gen) {
+					PMAP_UNLOCK(pmap);
+					goto restart;
+				}
+			}
+			pte = pmap_pdpe(pmap, pv->pv_va);
+			if ((*pte & PG_W) != 0)
+				count++;
+			PMAP_UNLOCK(pmap);
+		}
 	}
 	rw_runlock(lock);
 	rw_runlock(&pvh_global_lock);
@@ -5464,7 +5528,10 @@ pmap_remove_pages(pmap_t pmap)
 					    (m->flags & PG_FICTITIOUS) == 0) {
 						pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 						if (TAILQ_EMPTY(&pvh->pv_list))
-							vm_page_aflag_clear(m, PGA_WRITEABLE);
+                                                        pvh = pa_1gb_to_pvh(VM_PAGE_TO_PHYS(m));
+                                                        if (TAILQ_EMPTY(&pvh->pv_list)) {
+								vm_page_aflag_clear(m, PGA_WRITEABLE);
+                                                        }
 					}
 				}
 				pmap_unuse_pt(pmap, pv->pv_va, ptepde, &free);
