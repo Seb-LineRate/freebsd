@@ -98,6 +98,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_pageout.h>
+#include <vm/vm_phys.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_pager.h>
 #include <vm/vm_extern.h>
@@ -1446,6 +1447,122 @@ vm_fault_wire(vm_map_t map, vm_offset_t start, vm_offset_t end,
 	 */
 	for (va = start; va < end; va += PAGE_SIZE) {
 		rv = vm_fault(map, va, VM_PROT_NONE, VM_FAULT_CHANGE_WIRING);
+		if (rv) {
+			if (va != start)
+				vm_fault_unwire(map, start, va, fictitious);
+			return (rv);
+		}
+	}
+	return (KERN_SUCCESS);
+}
+
+/*
+ *	vm_fault_wire_1gb:
+ *
+ *	Wire down some 1GB superpages.
+ */
+int
+vm_fault_wire_1gb(vm_map_t map, vm_offset_t start, vm_offset_t end, boolean_t user_wire, boolean_t fictitious) {
+	vm_offset_t va;
+	int rv;
+        vm_page_t m;
+
+	vm_prot_t fault_type;
+	int fault_flags;
+        unsigned long num_4k_pages;
+
+
+        num_4k_pages = (end - start) / PAGE_SIZE;
+
+        m = vm_phys_alloc_contig(
+            num_4k_pages,
+            0,               // lowest physical address i want
+            -1,              // highest physical address i want
+            1024*1024*1024,  // alignment, 1 GB
+            0                // "boundary", 0 means ignore
+        );
+        if (m == NULL) {
+            return (KERN_NO_SPACE);
+        }
+
+
+        // verify that the array of pages we got from vm_phys_alloc_contig()
+        // is aligned on a 1 GB boundary
+        KASSERT(
+            (m[0].phys_addr % (1024*1024*1024)) == 0,
+            ("pages from vm_phys_alloc_contig() are not aligned on a 1 GB boundary!");
+        );
+
+
+#ifdef INVARIANTS
+        //
+        // verify that all the pages are in order and physically contiguous
+        //
+        {
+            int i;
+
+            for (i = 1; i < num_4k_pages; i++) {
+                vm_page_t m_tmp = &m[i];
+                vm_page_t m_prev = &m[i-1];
+
+                KASSERT(
+                    m_tmp->phys_addr == (m_prev->phys_addr + PAGE_SIZE),
+                    (
+                        "page (pindex=%ld, phys_addr=0x%016lx) not contiguous with previous page!",
+                        m_tmp->pindex,
+                        m_tmp->phys_addr
+                    )
+                );
+            }
+        }
+#endif
+
+
+        //
+        // initialize all the pages just like a real memory allocator would
+        //
+        {
+            int i;
+
+            for (i = 0; i < num_4k_pages; i++) {
+                vm_page_t m_tmp = &m[i];
+
+                // verify invariants (these checks duplicate what vm_phys_alloc_pages() does)
+                KASSERT(m_tmp->queue == PQ_NONE, ("vm_fault_wire_1gb: page %p has unexpected queue %d", m_tmp, m_tmp->queue));
+                KASSERT(m_tmp->wire_count == 0, ("vm_fault_wire_1gb: page %p is wired", m_tmp));
+                KASSERT(m_tmp->hold_count == 0, ("vm_fault_wire_1gb: page %p is held", m_tmp));
+                KASSERT(m_tmp->busy == 0, ("vm_fault_wire_1gb: page %p is busy", m_tmp));
+                KASSERT(m_tmp->dirty == 0, ("vm_fault_wire_1gb: page %p is dirty", m_tmp));
+                KASSERT(pmap_page_get_memattr(m_tmp) == VM_MEMATTR_DEFAULT, ("vm_fault_wire_1gb: page %p has unexpected memattr %d", m_tmp, pmap_page_get_memattr(m_tmp)));
+                KASSERT((m_tmp->flags & PG_CACHED) == 0, ("vm_fault_wire_1gb: got a cached page"));
+                KASSERT(!VM_PAGE_IS_FREE(m_tmp), ("vm_fault_wire_1gb: page %p is free, but we just allocated it!", m_tmp));
+                KASSERT(m_tmp->valid == 0, ("vm_fault_wire_1gb: free page %p is valid", m_tmp));
+
+                // mark all the pages busy
+                m_tmp->oflags = VPO_BUSY;
+
+                // note that we're managing these pages now
+                // m_tmp->flags &= ~PG_UNMANAGED;
+
+                // vm_page_alloc() does this
+                m_tmp->act_count = 0;
+            }
+        }
+
+	if (user_wire) {
+		fault_type = VM_PROT_READ;
+	} else {
+		fault_type = VM_PROT_READ | VM_PROT_WRITE;
+	}
+	fault_flags = VM_FAULT_CHANGE_WIRING;
+
+	/*
+	 * We simulate a fault to get the page and enter it in the physical
+	 * map.  For user wiring, we only ask for read access on currently
+	 * read-only sections.
+	 */
+	for (va = start; va < end; va += (1024 * 1024 * 1024)) {
+		rv = vm_fault_1gb(map, va, fault_type, fault_flags, m);
 		if (rv) {
 			if (va != start)
 				vm_fault_unwire(map, start, va, fictitious);
