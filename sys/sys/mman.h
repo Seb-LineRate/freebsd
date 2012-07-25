@@ -91,6 +91,7 @@
  */
 #define	MAP_NOCORE	 0x00020000 /* dont include these pages in a coredump */
 #define	MAP_PREFAULT_READ 0x00040000 /* prefault mapping for reading */
+#define	MAP_1GB_PAGE      0x00080000 /* use a 1 GB superpage or fail the mmap */
 #endif /* __BSD_VISIBLE */
 
 #if __POSIX_VISIBLE >= 199309
