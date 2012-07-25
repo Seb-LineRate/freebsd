@@ -165,8 +165,9 @@ __FBSDID("$FreeBSD$");
 #define PV_STAT(x)	do { } while (0)
 #endif
 
-#define	pa_index(pa)	((pa) >> PDRSHIFT)
-#define	pa_to_pvh(pa)	(&pv_table[pa_index(pa)])
+// for accessing the 2MB PV mappings
+#define	pa_2mb_index(pa)	((pa) >> PDRSHIFT)
+#define	pa_2mb_to_pvh(pa)	(&pv_2mb_table[pa_2mb_index(pa)])
 
 struct pmap kernel_pmap_store;
 
@@ -215,7 +216,7 @@ static struct {
  */
 static TAILQ_HEAD(pch, pv_chunk) pv_chunks = TAILQ_HEAD_INITIALIZER(pv_chunks);
 static long pv_entry_count;
-static struct md_page *pv_table;
+static struct md_page *pv_2mb_table;
 
 /*
  * All those kernel PT submaps that BSD is so fond of
@@ -780,19 +781,19 @@ pmap_init(void)
 	}
 
 	/*
-	 * Calculate the size of the pv head table for superpages.
+	 * Calculate the size of the pv head table for 2MB superpages.
 	 */
 	for (i = 0; phys_avail[i + 1]; i += 2);
 	pv_npg = round_2mpage(phys_avail[(i - 2) + 1]) / NBPDR;
 
 	/*
-	 * Allocate memory for the pv head table for superpages.
+	 * Allocate memory for the pv head table for 2MB superpages.
 	 */
 	s = (vm_size_t)(pv_npg * sizeof(struct md_page));
 	s = round_page(s);
-	pv_table = (struct md_page *)kmem_alloc(kernel_map, s);
+	pv_2mb_table = (struct md_page *)kmem_alloc(kernel_map, s);
 	for (i = 0; i < pv_npg; i++)
-		TAILQ_INIT(&pv_table[i].pv_list);
+		TAILQ_INIT(&pv_2mb_table[i].pv_list);
 }
 
 SYSCTL_NODE(_vm_pmap, OID_AUTO, pde, CTLFLAG_RD, 0,
@@ -2167,7 +2168,7 @@ pmap_pv_reclaim(pmap_t locked_pmap)
 				TAILQ_REMOVE(&m->md.pv_list, pv, pv_list);
 				if (TAILQ_EMPTY(&m->md.pv_list) &&
 				    (m->flags & PG_FICTITIOUS) == 0) {
-					pvh = pa_to_pvh(VM_PAGE_TO_PHYS(m));
+					pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 					if (TAILQ_EMPTY(&pvh->pv_list)) {
 						vm_page_aflag_clear(m,
 						    PGA_WRITEABLE);
@@ -2378,7 +2379,7 @@ pmap_pv_demote_pde(pmap_t pmap, vm_offset_t va, vm_paddr_t pa)
 	 * Transfer the 2mpage's pv entry for this mapping to the first
 	 * page's pv list.
 	 */
-	pvh = pa_to_pvh(pa);
+	pvh = pa_2mb_to_pvh(pa);
 	va = trunc_2mpage(va);
 	pv = pmap_pvh_remove(pvh, pmap, va);
 	KASSERT(pv != NULL, ("pmap_pv_demote_pde: pv not found"));
@@ -2423,7 +2424,7 @@ pmap_pv_promote_pde(pmap_t pmap, vm_offset_t va, vm_paddr_t pa)
 	va = trunc_2mpage(va);
 	pv = pmap_pvh_remove(&m->md, pmap, va);
 	KASSERT(pv != NULL, ("pmap_pv_promote_pde: pv not found"));
-	pvh = pa_to_pvh(pa);
+	pvh = pa_2mb_to_pvh(pa);
 	TAILQ_INSERT_TAIL(&pvh->pv_list, pv, pv_list);
 	/* Free the remaining NPTEPG - 1 pv entries. */
 	va_last = va + NBPDR - PAGE_SIZE;
@@ -2457,7 +2458,7 @@ pmap_remove_entry(pmap_t pmap, vm_page_t m, vm_offset_t va)
 	rw_assert(&pvh_global_lock, RA_WLOCKED);
 	pmap_pvh_free(&m->md, pmap, va);
 	if (TAILQ_EMPTY(&m->md.pv_list) && (m->flags & PG_FICTITIOUS) == 0) {
-		pvh = pa_to_pvh(VM_PAGE_TO_PHYS(m));
+		pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 		if (TAILQ_EMPTY(&pvh->pv_list))
 			vm_page_aflag_clear(m, PGA_WRITEABLE);
 	}
@@ -2509,7 +2510,7 @@ pmap_pv_insert_pde(pmap_t pmap, vm_offset_t va, vm_paddr_t pa)
 	rw_assert(&pvh_global_lock, RA_WLOCKED);
 	if ((pv = get_pv_entry(pmap, TRUE)) != NULL) {
 		pv->pv_va = va;
-		pvh = pa_to_pvh(pa);
+		pvh = pa_2mb_to_pvh(pa);
 		TAILQ_INSERT_TAIL(&pvh->pv_list, pv, pv_list);
 		return (TRUE);
 	} else
@@ -2673,7 +2674,7 @@ pmap_remove_pde(pmap_t pmap, pd_entry_t *pdq, vm_offset_t sva,
 		pmap_invalidate_page(kernel_pmap, sva);
 	pmap_resident_count_dec(pmap, NBPDR / PAGE_SIZE);
 	if (oldpde & PG_MANAGED) {
-		pvh = pa_to_pvh(oldpde & PG_PS_FRAME);
+		pvh = pa_2mb_to_pvh(oldpde & PG_PS_FRAME);
 		pmap_pvh_free(pvh, pmap, sva);
 		eva = sva + NBPDR;
 		for (va = sva, m = PHYS_TO_VM_PAGE(oldpde & PG_PS_FRAME);
@@ -2924,7 +2925,7 @@ pmap_remove_all(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	if ((m->flags & PG_FICTITIOUS) != 0)
 		goto small_mappings;
-	pvh = pa_to_pvh(VM_PAGE_TO_PHYS(m));
+	pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 	while ((pv = TAILQ_FIRST(&pvh->pv_list)) != NULL) {
 		pmap = PV_PMAP(pv);
 		PMAP_LOCK(pmap);
@@ -3432,7 +3433,7 @@ validate:
 			if ((origpte & PG_MANAGED) != 0 &&
 			    TAILQ_EMPTY(&om->md.pv_list) &&
 			    ((om->flags & PG_FICTITIOUS) != 0 ||
-			    TAILQ_EMPTY(&pa_to_pvh(opa)->pv_list)))
+			    TAILQ_EMPTY(&pa_2mb_to_pvh(opa)->pv_list)))
 				vm_page_aflag_clear(om, PGA_WRITEABLE);
 			if (invlva)
 				pmap_invalidate_page(pmap, va);
@@ -4067,7 +4068,7 @@ pmap_page_exists_quick(pmap_t pmap, vm_page_t m)
 			break;
 	}
 	if (!rv && loops < 16 && (m->flags & PG_FICTITIOUS) == 0) {
-		pvh = pa_to_pvh(VM_PAGE_TO_PHYS(m));
+		pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 		TAILQ_FOREACH(pv, &pvh->pv_list, pv_list) {
 			if (PV_PMAP(pv) == pmap) {
 				rv = TRUE;
@@ -4099,7 +4100,7 @@ pmap_page_wired_mappings(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	count = pmap_pvh_wired_mappings(&m->md, count);
 	if ((m->flags & PG_FICTITIOUS) == 0) {
-	    count = pmap_pvh_wired_mappings(pa_to_pvh(VM_PAGE_TO_PHYS(m)),
+	    count = pmap_pvh_wired_mappings(pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m)),
 	        count);
 	}
 	rw_wunlock(&pvh_global_lock);
@@ -4144,7 +4145,7 @@ pmap_page_is_mapped(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	rv = !TAILQ_EMPTY(&m->md.pv_list) ||
 	    ((m->flags & PG_FICTITIOUS) == 0 &&
-	    !TAILQ_EMPTY(&pa_to_pvh(VM_PAGE_TO_PHYS(m))->pv_list));
+	    !TAILQ_EMPTY(&pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m))->pv_list));
 	rw_wunlock(&pvh_global_lock);
 	return (rv);
 }
@@ -4242,7 +4243,7 @@ pmap_remove_pages(pmap_t pmap)
 				pc->pc_map[field] |= bitmask;
 				if ((tpte & PG_PS) != 0) {
 					pmap_resident_count_dec(pmap, NBPDR / PAGE_SIZE);
-					pvh = pa_to_pvh(tpte & PG_PS_FRAME);
+					pvh = pa_2mb_to_pvh(tpte & PG_PS_FRAME);
 					TAILQ_REMOVE(&pvh->pv_list, pv, pv_list);
 					if (TAILQ_EMPTY(&pvh->pv_list)) {
 						for (mt = m; mt < &m[NBPDR / PAGE_SIZE]; mt++)
@@ -4266,7 +4267,7 @@ pmap_remove_pages(pmap_t pmap)
 					if ((m->aflags & PGA_WRITEABLE) != 0 &&
 					    TAILQ_EMPTY(&m->md.pv_list) &&
 					    (m->flags & PG_FICTITIOUS) == 0) {
-						pvh = pa_to_pvh(VM_PAGE_TO_PHYS(m));
+						pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 						if (TAILQ_EMPTY(&pvh->pv_list))
 							vm_page_aflag_clear(m, PGA_WRITEABLE);
 					}
@@ -4311,7 +4312,7 @@ pmap_is_modified(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	rv = pmap_is_modified_pvh(&m->md) ||
 	    ((m->flags & PG_FICTITIOUS) == 0 &&
-	    pmap_is_modified_pvh(pa_to_pvh(VM_PAGE_TO_PHYS(m))));
+	    pmap_is_modified_pvh(pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m))));
 	rw_wunlock(&pvh_global_lock);
 	return (rv);
 }
@@ -4383,7 +4384,7 @@ pmap_is_referenced(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	rv = pmap_is_referenced_pvh(&m->md) ||
 	    ((m->flags & PG_FICTITIOUS) == 0 &&
-	    pmap_is_referenced_pvh(pa_to_pvh(VM_PAGE_TO_PHYS(m))));
+	    pmap_is_referenced_pvh(pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m))));
 	rw_wunlock(&pvh_global_lock);
 	return (rv);
 }
@@ -4442,7 +4443,7 @@ pmap_remove_write(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	if ((m->flags & PG_FICTITIOUS) != 0)
 		goto small_mappings;
-	pvh = pa_to_pvh(VM_PAGE_TO_PHYS(m));
+	pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 	TAILQ_FOREACH_SAFE(pv, &pvh->pv_list, pv_list, next_pv) {
 		pmap = PV_PMAP(pv);
 		PMAP_LOCK(pmap);
@@ -4505,7 +4506,7 @@ pmap_ts_referenced(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	if ((m->flags & PG_FICTITIOUS) != 0)
 		goto small_mappings;
-	pvh = pa_to_pvh(VM_PAGE_TO_PHYS(m));
+	pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 	TAILQ_FOREACH_SAFE(pv, &pvh->pv_list, pv_list, pvn) {
 		pmap = PV_PMAP(pv);
 		PMAP_LOCK(pmap);
@@ -4593,7 +4594,7 @@ pmap_clear_modify(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	if ((m->flags & PG_FICTITIOUS) != 0)
 		goto small_mappings;
-	pvh = pa_to_pvh(VM_PAGE_TO_PHYS(m));
+	pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 	TAILQ_FOREACH_SAFE(pv, &pvh->pv_list, pv_list, next_pv) {
 		pmap = PV_PMAP(pv);
 		PMAP_LOCK(pmap);
@@ -4663,7 +4664,7 @@ pmap_clear_reference(vm_page_t m)
 	rw_wlock(&pvh_global_lock);
 	if ((m->flags & PG_FICTITIOUS) != 0)
 		goto small_mappings;
-	pvh = pa_to_pvh(VM_PAGE_TO_PHYS(m));
+	pvh = pa_2mb_to_pvh(VM_PAGE_TO_PHYS(m));
 	TAILQ_FOREACH_SAFE(pv, &pvh->pv_list, pv_list, next_pv) {
 		pmap = PV_PMAP(pv);
 		PMAP_LOCK(pmap);
