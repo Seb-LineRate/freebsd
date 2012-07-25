@@ -2452,8 +2452,12 @@ vm_map_wire(vm_map_t map, vm_offset_t start, vm_offset_t end,
 			 */
 			vm_map_busy(map);
 			vm_map_unlock(map);
-			rv = vm_fault_wire(map, saved_start, saved_end,
-			    fictitious);
+                        if (flags & VM_MAP_WIRE_1GB_PAGE) {
+                            rv = vm_fault_wire_1gb(map, saved_start, saved_end, user_wire, fictitious);
+                        } else {
+                            rv = vm_fault_wire(map, saved_start, saved_end,
+                                fictitious);
+                        }
 			vm_map_lock(map);
 			vm_map_unbusy(map);
 			if (last_timestamp + 1 != map->timestamp) {
