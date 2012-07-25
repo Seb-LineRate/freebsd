@@ -1015,6 +1015,248 @@ vnode_locked:
 	return (KERN_SUCCESS);
 }
 
+
+static int vm_fault_1gb(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type, int fault_flags, vm_page_t page_array) __attribute__((unused));
+
+static int
+vm_fault_1gb(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
+	 int fault_flags, vm_page_t page_array)
+{
+	vm_prot_t prot;
+	int result;
+	boolean_t growstack, wired;
+	int map_generation;
+	int hardfault;
+	struct faultstate fs;
+        int i;
+
+	hardfault = 0;
+	growstack = TRUE;
+	PCPU_INC(cnt.v_vm_faults);
+	fs.vp = NULL;
+
+	/*
+	 * Find the backing store object and offset into it to begin the
+	 * search.
+	 */
+	fs.map = map;
+	result = vm_map_lookup(
+            &fs.map,
+            vaddr,
+            fault_type,
+            &fs.entry,
+	    &fs.first_object,
+            &fs.first_pindex,
+            &prot,
+            &wired
+        );
+	if (result != KERN_SUCCESS) {
+                // this should never happen when faulting 1 gb superpages
+                return (KERN_FAILURE);
+        }
+
+	map_generation = fs.map->timestamp;
+
+	if (fs.entry->eflags & MAP_ENTRY_NOFAULT) {
+		panic("vm_fault: fault on nofault entry, addr: %lx", (u_long)vaddr);
+	}
+
+	/*
+	 * Make a reference to this object to prevent its disposal while we
+	 * are messing with it.  Once we have the reference, the map is free
+	 * to be diddled.  Since objects reference their shadows (and copies),
+	 * they will stay around as well.
+	 *
+	 * Bump the paging-in-progress count to prevent size changes (e.g.
+	 * truncation operations) during I/O.  This must be done after
+	 * obtaining the vnode lock in order to avoid possible deadlocks.
+	 */
+	VM_OBJECT_WLOCK(fs.first_object);
+	vm_object_reference_locked(fs.first_object);
+	vm_object_pip_add(fs.first_object, 1);
+
+	fs.lookup_still_valid = TRUE;
+
+	if (wired)
+		fault_type = prot | (fault_type & VM_PROT_COPY);
+
+	fs.first_m = NULL;
+
+        //
+        // insert 1 gig's worth of 4 kB pages into the vm_map
+        //
+
+        fs.object = fs.first_object;
+
+        /*
+         * If the object is dead, we stop here
+         */
+        if (fs.object->flags & OBJ_DEAD) {
+                unlock_and_deallocate(&fs);
+                return (KERN_PROTECTION_FAILURE);
+        }
+
+        // FIXME: number of 4k pages per 1g page
+        for (i = 0; i < (512 * 512); i ++) {
+            fs.pindex = fs.first_pindex + i;
+
+            /*
+             * See if page is resident
+             */
+            fs.m = vm_page_lookup(fs.object, fs.pindex);
+            if (fs.m != NULL) {
+                    panic("found an already-resident page while faulting a 1gb superpage!");
+            }
+
+            if (fs.pindex >= fs.object->size) {
+                    unlock_and_deallocate(&fs);
+                    return (KERN_PROTECTION_FAILURE);
+            }
+
+#if VM_NRESERVLEVEL > 0
+            if ((fs.object->flags & OBJ_COLORED) == 0) {
+                    fs.object->flags |= OBJ_COLORED;
+                    fs.object->pg_color = atop(vaddr) -
+                        fs.pindex;
+            }
+#endif
+
+
+            //
+            // This block comes from internalizing vm_page_alloc():
+            //
+            {
+                // page_array is a gig of memory that the caller has pre-allocated and passed in
+                fs.m = &page_array[fs.pindex];
+
+                if (
+                    (fs.object->memattr != VM_MEMATTR_DEFAULT)
+                    && (fs.object->type != OBJT_DEVICE)
+                    && (fs.object->type != OBJT_SG)
+                ) {
+                     pmap_page_set_memattr(fs.m, fs.object->memattr);
+                }
+                vm_page_insert(fs.m, fs.object, fs.pindex);
+            }
+
+	    // FIXME: KASSERT
+            if (fs.object->backing_object_offset != 0) {
+                panic("fs.object->backing_object_offset != 0!");
+            }
+
+            // FIXME: KASSERT
+            if (fs.object->backing_object != NULL) {
+                panic("fs.object->backing_object != NULL!");
+            }
+
+            fs.first_m = NULL;
+
+            /*
+             * Zero the page if necessary and mark it valid.
+             */
+            if ((fs.m->flags & PG_ZERO) == 0) {
+                    pmap_zero_page(fs.m);
+            } else {
+                    PCPU_INC(cnt.v_ozfod);
+            }
+            PCPU_INC(cnt.v_zfod);
+            fs.m->valid = VM_PAGE_BITS_ALL;
+
+
+            if (prot & VM_PROT_WRITE) {
+                    vm_object_set_writeable_dirty(fs.object);
+
+                    /*
+                     * If the fault is a write, we know that this page is being
+                     * written NOW so dirty it explicitly to save on
+                     * pmap_is_modified() calls later.
+                     *
+                     * If this is a NOSYNC mmap we do not want to set VPO_NOSYNC
+                     * if the page is already dirty to prevent data written with
+                     * the expectation of being synced from not being synced.
+                     * Likewise if this entry does not request NOSYNC then make
+                     * sure the page isn't marked NOSYNC.  Applications sharing
+                     * data should use the same flags to avoid ping ponging.
+                     *
+                     * Also tell the backing pager, if any, that it should remove
+                     * any swap backing since the page is now dirty.
+                     */
+                    if (fs.entry->eflags & MAP_ENTRY_NOSYNC) {
+                            if (fs.m->dirty == 0)
+                                    fs.m->oflags |= VPO_NOSYNC;
+                    } else {
+                            fs.m->oflags &= ~VPO_NOSYNC;
+                    }
+                    if (fault_flags & VM_FAULT_DIRTY) {
+                            vm_page_dirty(fs.m);
+                            vm_pager_page_unswapped(fs.m);
+                    }
+            }
+
+            /*
+             * Page must be completely valid or it is not fit to
+             * map into user space.  vm_pager_get_pages() ensures this.
+             */
+            KASSERT(fs.m->valid == VM_PAGE_BITS_ALL,
+                ("vm_fault: page %p partially invalid", fs.m));
+        }
+
+
+	/*
+	 * Put this page into the physical map.  We had to do the unlock above
+	 * because pmap_enter() may sleep.  We don't put the page
+	 * back on the active queue until later so that the pageout daemon
+	 * won't find it (yet).
+	 */
+
+        fs.m = &page_array[fs.first_pindex];
+
+        pmap_enter_object_1gb(fs.map->pmap, vaddr, fs.m, prot);
+
+        if (((fault_flags & VM_FAULT_CHANGE_WIRING) == 0) && (wired == 0)) {
+                vm_fault_prefault(&fs, vaddr, 0, 0);
+        }
+
+
+        //
+        // this block is internalized from vm_page_wire()
+        //
+
+        for (i = 0; i < (512 * 512); i ++) {
+            fs.pindex = fs.first_pindex + i;
+            fs.m = &page_array[fs.pindex];
+
+            vm_page_lock(fs.m);
+
+            /*
+             * If the page is not wired down, then put it where the pageout daemon
+             * can find it.
+             */
+            if (fault_flags & VM_FAULT_CHANGE_WIRING) {
+                    if (wired) {
+                            vm_page_wire(fs.m);
+                    } else {
+                            vm_page_unwire(fs.m, 1);
+                    }
+            } else {
+                    vm_page_activate(fs.m);
+            }
+            vm_page_unlock(fs.m);
+        }
+
+
+	/*
+	 * Unlock everything, and return
+	 */
+	unlock_and_deallocate(&fs);
+	if (hardfault)
+		curthread->td_ru.ru_majflt++;
+	else
+		curthread->td_ru.ru_minflt++;
+
+	return (KERN_SUCCESS);
+}
+
 /*
  * Speed up the reclamation of up to "distance" pages that precede the
  * faulting pindex within the first object of the shadow chain.
