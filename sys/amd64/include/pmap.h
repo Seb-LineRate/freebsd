@@ -177,7 +177,7 @@ typedef u_int64_t pml4_entry_t;
 #define	addr_PML4pml4e	(addr_PML4map + (PML4PML4I * sizeof(pml4_entry_t)))
 #define	PTmap		((pt_entry_t *)(addr_PTmap))
 #define	PDmap		((pd_entry_t *)(addr_PDmap))
-#define	PDPmap		((pd_entry_t *)(addr_PDPmap))
+#define	PDPmap		((pdp_entry_t *)(addr_PDPmap))
 #define	PML4map		((pd_entry_t *)(addr_PML4map))
 #define	PML4pml4e	((pd_entry_t *)(addr_PML4pml4e))
 
