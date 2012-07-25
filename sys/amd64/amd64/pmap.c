@@ -419,6 +419,7 @@ static boolean_t pmap_pv_insert_pde(pmap_t pmap, vm_offset_t va, vm_paddr_t pa,
 		    struct rwlock **lockp);
 static void	pmap_pv_promote_pde(pmap_t pmap, vm_offset_t va, vm_paddr_t pa,
 		    struct rwlock **lockp);
+static void	pmap_pv_promote_pdpe(pmap_t pmap, vm_offset_t va, vm_paddr_t pa);
 static void	pmap_pv_demote_pdpe(pmap_t pmap, vm_offset_t va, vm_paddr_t pa,
 		    struct rwlock **lockp);
 static void	pmap_pvh_free(struct md_page *pvh, pmap_t pmap, vm_offset_t va);
@@ -450,6 +451,7 @@ static void pmap_kenter_attr(vm_offset_t va, vm_paddr_t pa, int mode);
 static void pmap_pde_attr(pd_entry_t *pde, int cache_bits, int mask);
 static void pmap_promote_pde(pmap_t pmap, pd_entry_t *pde, vm_offset_t va,
     struct rwlock **lockp);
+static void pmap_promote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va) __attribute__((unused));
 static boolean_t pmap_protect_pde(pmap_t pmap, pd_entry_t *pde, vm_offset_t sva,
     vm_prot_t prot);
 static void pmap_pte_attr(pt_entry_t *pte, int cache_bits, int mask);
@@ -3408,6 +3410,47 @@ pmap_pv_promote_pde(pmap_t pmap, vm_offset_t va, vm_paddr_t pa,
 	} while (va < va_last);
 }
 
+
+/*
+ * After promotion from 512 2MB page mappings to a single 1GB page mapping,
+ * replace the many pv entries for the 2MB page mappings by a single pv entry
+ * for the 1GB page mapping.
+ */
+static void
+pmap_pv_promote_pdpe(pmap_t pmap, vm_offset_t va, vm_paddr_t pa)
+{
+	struct md_page *pvh_2mb, *pvh_1gb;
+	pv_entry_t pv;
+	vm_offset_t va_last;
+
+	rw_assert(&pvh_global_lock, RA_WLOCKED);
+	KASSERT((pa & PDPMASK) == 0,
+	    ("pmap_pv_promote_pdpe: pa is not 1gb page aligned"));
+
+	/*
+	 * Transfer the first page's pv entry for this mapping to the
+	 * 1gb page's pv list.  Aside from avoiding the cost of a call
+	 * to get_pv_entry(), a transfer avoids the possibility that
+	 * get_pv_entry() calls pmap_collect() and that pmap_collect()
+	 * removes one of the mappings that is being promoted.
+	 */
+	va = trunc_1gpage(va);
+	pvh_2mb = pa_2mb_to_pvh(pa);
+	pv = pmap_pvh_remove(pvh_2mb, pmap, va);
+	KASSERT(pv != NULL, ("pmap_pv_promote_pdpe: pv not found"));
+	pvh_1gb = pa_1gb_to_pvh(pa);
+	TAILQ_INSERT_TAIL(&pvh_1gb->pv_list, pv, pv_next);
+
+	/* Free the remaining NPTEPG - 1 pv entries. */
+	va_last = va + NBPDP - NBPDR;
+	do {
+		va += NBPDR;
+		pa += NBPDR;
+		pvh_2mb = pa_2mb_to_pvh(pa);
+		pmap_pvh_free(pvh_2mb, pmap, va);
+	} while (va < va_last);
+}
+
 /*
  * First find and then destroy the pv entry for the specified pmap and virtual
  * address.  This operation can be performed on pv lists for either 4KB or 2MB
@@ -4396,6 +4439,124 @@ setpte:
 
 	atomic_add_long(&pmap_pde_promotions, 1);
 	CTR2(KTR_PMAP, "pmap_promote_pde: success for va %#lx"
+	    " in pmap %p", va, pmap);
+}
+
+
+/*
+ * Tries to promote the 512, contiguous 2MB page mappings that are within a
+ * single page table page (PTP) to a single 1GB page mapping.  For promotion
+ * to occur, two conditions must be met: (1) the 2MB page mappings must map
+ * aligned, contiguous physical memory and (2) the 2MB page mappings must have
+ * identical characteristics.
+ */
+static void
+pmap_promote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va)
+{
+	pdp_entry_t newpdpe;
+	pd_entry_t *firstpde, oldpde, pa, *pde;
+	vm_offset_t oldpdeva;
+	vm_page_t mpte;
+	pt_entry_t PG_G, PG_A, PG_V, PG_RW, PG_M;
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+
+	PG_G = pmap_global_bit(pmap);
+	PG_A = pmap_accessed_bit(pmap);
+	PG_M = pmap_modified_bit(pmap);
+	PG_V = pmap_valid_bit(pmap);
+	PG_RW = pmap_rw_bit(pmap);
+
+	/*
+	 * Examine the first PDE in the specified PD.  Abort if this PDE is
+	 * either invalid, unused, not a superpage, or does not map the
+	 * first 2MB physical page within a 1GB page.
+	 */
+	firstpde = (pd_entry_t *)PHYS_TO_DMAP(*pdpe & PG_FRAME);
+
+setpdpe:
+	newpdpe = *firstpde;
+	// verify that the first PDE maps a frame with the proper alignment for a PDPE superpage
+	if ((newpdpe & ((PG_FRAME & PDPMASK) | PG_PS | PG_A | PG_V)) != (PG_PS | PG_A | PG_V)) {
+		CTR2(KTR_PMAP, "pmap_promote_pdpe: failure for va %#lx"
+		    " in pmap %p", va, pmap);
+		return;
+	}
+	if ((newpdpe & (PG_M | PG_RW)) == PG_RW) {
+		/*
+		 * When PG_M is already clear, PG_RW can be cleared without
+		 * a TLB invalidation.
+		 */
+		if (!atomic_cmpset_long(firstpde, newpdpe, newpdpe & ~PG_RW))
+			goto setpdpe;
+		newpdpe &= ~PG_RW;
+	}
+
+	/*
+	 * Examine each of the other PDEs in the specified PD.  Abort if this
+	 * PDE maps an unexpected 2MB physical page or does not have identical
+	 * characteristics to the first PDE.
+	 */
+	pa = (newpdpe & (PG_FRAME | PG_A | PG_V | PG_PS)) + NBPDP - NBPDR;
+	for (pde = firstpde + NPTEPG - 1; pde > firstpde; pde--) {
+setpde:
+		oldpde = *pde;
+		if ((oldpde & (PG_FRAME | PG_A | PG_V | PG_PS)) != pa) {
+			CTR2(KTR_PMAP, "pmap_promote_pdpe: failure for va %#lx"
+			    " in pmap %p", va, pmap);
+			return;
+		}
+		if ((oldpde & (PG_M | PG_RW)) == PG_RW) {
+			/*
+			 * When PG_M is already clear, PG_RW can be cleared
+			 * without a TLB invalidation.
+			 */
+			if (!atomic_cmpset_long(pde, oldpde, oldpde & ~PG_RW))
+				goto setpde;
+			oldpde &= ~PG_RW;
+			oldpdeva = (oldpde & PG_FRAME & PDPMASK) |
+			    (va & ~PDPMASK);
+			CTR2(KTR_PMAP, "pmap_promote_pdpe: protect for va %#lx"
+			    " in pmap %p", oldpdeva, pmap);
+		}
+		if ((oldpde & PG_PDE_PROMOTE) != (newpdpe & PG_PDE_PROMOTE)) {
+			CTR2(KTR_PMAP, "pmap_promote_pdpe: failure for va %#lx"
+			    " in pmap %p", va, pmap);
+			return;
+		}
+		pa -= NBPDR;
+	}
+
+	/*
+	 * Save the page table page in its current state until the PDPE
+	 * mapping the superpage is demoted by pmap_demote_pdpe() or
+	 * destroyed by pmap_remove_pdpe().
+	 */
+	mpte = PHYS_TO_VM_PAGE(*pdpe & PG_FRAME);
+	KASSERT(mpte >= vm_page_array &&
+	    mpte < &vm_page_array[vm_page_array_size],
+	    ("pmap_promote_pdpe: page table page is out of range"));
+	// KASSERT(mpte->pindex == pmap_pde_pindex(va),
+	    // ("pmap_promote_pdpe: page table page's pindex (%ld) is wrong (vm_page pindex is %ld)", pmap_pde_pindex(va), mpte->pindex));
+	pmap_insert_pd_page(pmap, mpte);
+
+	/*
+	 * Promote the pv entries.
+	 */
+	if ((newpdpe & PG_MANAGED) != 0)
+		pmap_pv_promote_pdpe(pmap, va, newpdpe & PG_1GB_PS_FRAME);
+
+	/*
+	 * The PDPE PAT bit is in the same place as the PDE PAT bit (unlike
+	 * the PTE PAT bit), so nothing special is needed to propagate it.
+	 */
+
+	/*
+	 * Map the superpage.
+	 */
+	pdpe_store(pdpe, newpdpe);
+
+	CTR2(KTR_PMAP, "pmap_promote_pdpe: success for va %#lx"
 	    " in pmap %p", va, pmap);
 }
 
