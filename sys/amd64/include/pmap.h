@@ -309,6 +309,7 @@ struct pmap {
 	enum pmap_type		pm_type;	/* regular or nested tables */
 	struct pmap_statistics	pm_stats;	/* pmap statistics */
 	struct vm_radix		pm_root;	/* spare page table pages */
+	struct vm_radix		pd_pm_root;	/* spare page directory pages */
 	long			pm_eptgen;	/* EPT pmap generation id */
 	int			pm_flags;
 };
