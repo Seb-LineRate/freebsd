@@ -258,6 +258,7 @@ struct pmap {
 	/* spare u_int here due to padding */
 	struct pmap_statistics	pm_stats;	/* pmap statistics */
 	vm_page_t		pm_root;	/* spare page table pages */
+	vm_page_t		pd_pm_root;	/* spare page directory pages */
 };
 
 typedef struct pmap	*pmap_t;

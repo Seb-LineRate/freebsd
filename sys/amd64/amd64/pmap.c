@@ -259,6 +259,10 @@ static void pmap_insert_pt_page(pmap_t pmap, vm_page_t mpte);
 static vm_page_t pmap_lookup_pt_page(pmap_t pmap, vm_offset_t va);
 static void pmap_remove_pt_page(pmap_t pmap, vm_page_t mpte);
 
+static void pmap_insert_pd_page(pmap_t pmap, vm_page_t mpde) __attribute__ ((unused));
+static vm_page_t pmap_lookup_pd_page(pmap_t pmap, vm_offset_t va) __attribute__ ((unused));
+static void pmap_remove_pd_page(pmap_t pmap, vm_page_t mpde) __attribute__ ((unused));
+
 static boolean_t pmap_is_modified_pvh(struct md_page *pvh);
 static boolean_t pmap_is_referenced_pvh(struct md_page *pvh);
 static void pmap_kenter_attr(vm_offset_t va, vm_paddr_t pa, int mode);
@@ -619,6 +623,7 @@ pmap_bootstrap(vm_paddr_t *firstaddr)
 	PMAP_LOCK_INIT(kernel_pmap);
 	kernel_pmap->pm_pml4 = (pdp_entry_t *)PHYS_TO_DMAP(KPML4phys);
 	kernel_pmap->pm_root = NULL;
+	kernel_pmap->pd_pm_root = NULL;
 	CPU_FILL(&kernel_pmap->pm_active);	/* don't allow deactivation */
 	TAILQ_INIT(&kernel_pmap->pm_pvchunk);
 
@@ -1494,6 +1499,40 @@ pmap_insert_pt_page(pmap_t pmap, vm_page_t mpte)
 	pmap->pm_root = mpte;
 }
 
+
+/*
+ * Inserts the specified Page Directory page into the specified pmap's collection
+ * of idle Page Directory pages.  Each of a pmap's PD pages is responsible
+ * for mapping a distinct range of virtual addresses.  The pmap's collection is
+ * ordered by this virtual address range.
+ */
+static void
+pmap_insert_pd_page(pmap_t pmap, vm_page_t mpde)
+{
+	vm_page_t root;
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	root = pmap->pd_pm_root;
+	if (root == NULL) {
+		mpde->left = NULL;
+		mpde->right = NULL;
+	} else {
+		root = vm_page_splay(mpde->pindex, root);
+		if (mpde->pindex < root->pindex) {
+			mpde->left = root->left;
+			mpde->right = root;
+			root->left = NULL;
+		} else if (mpde->pindex == root->pindex)
+			panic("pmap_insert_pd_page: pindex already inserted");
+		else {
+			mpde->right = root->right;
+			mpde->left = root;
+			root->right = NULL;
+		}
+	}
+	pmap->pd_pm_root = mpde;
+}
+
 /*
  * Looks for a page table page mapping the specified virtual address in the
  * specified pmap's collection of idle page table pages.  Returns NULL if there
@@ -1512,6 +1551,30 @@ pmap_lookup_pt_page(pmap_t pmap, vm_offset_t va)
 			mpte = NULL;
 	}
 	return (mpte);
+}
+
+/*
+ * Looks for a Page Directory page mapping the specified virtual address in the
+ * specified pmap's collection of idle Page Directory pages.  Returns NULL if there
+ * is no PD page corresponding to the specified virtual address.
+ */
+static vm_page_t
+pmap_lookup_pd_page(pmap_t pmap, vm_offset_t va)
+{
+	vm_page_t mpde;
+	vm_pindex_t pindex;
+
+	pindex = pmap_pde_pindex(va);
+	pindex >>= NPDPEPGSHIFT;
+	pindex += NUPDE;
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	if ((mpde = pmap->pd_pm_root) != NULL && mpde->pindex != pindex) {
+		mpde = vm_page_splay(pindex, mpde);
+		if ((pmap->pd_pm_root = mpde)->pindex != pindex)
+			mpde = NULL;
+	}
+	return (mpde);
 }
 
 /*
@@ -1538,6 +1601,32 @@ pmap_remove_pt_page(pmap_t pmap, vm_page_t mpte)
 		root->right = mpte->right;
 	}
 	pmap->pm_root = root;
+}
+
+/*
+ * Removes the specified Page Directory page from the specified pmap's collection
+ * of idle PD pages.  The specified PD page must be a member of
+ * the pmap's collection.
+ */
+static void
+pmap_remove_pd_page(pmap_t pmap, vm_page_t mpde)
+{
+	vm_page_t root;
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	if (mpde != pmap->pd_pm_root) {
+		root = vm_page_splay(mpde->pindex, pmap->pd_pm_root);
+		KASSERT(mpde == root,
+		    ("pmap_remove_pd_page: mpde %p is missing from pmap %p",
+		    mpde, pmap));
+	}
+	if (mpde->left == NULL)
+		root = mpde->right;
+	else {
+		root = vm_page_splay(mpde->pindex, mpde->left);
+		root->right = mpde->right;
+	}
+	pmap->pd_pm_root = root;
 }
 
 /*
@@ -1635,6 +1724,7 @@ pmap_pinit0(pmap_t pmap)
 	PMAP_LOCK_INIT(pmap);
 	pmap->pm_pml4 = (pml4_entry_t *)PHYS_TO_DMAP(KPML4phys);
 	pmap->pm_root = NULL;
+	pmap->pd_pm_root = NULL;
 	CPU_ZERO(&pmap->pm_active);
 	PCPU_SET(curpmap, pmap);
 	TAILQ_INIT(&pmap->pm_pvchunk);
@@ -1676,6 +1766,7 @@ pmap_pinit(pmap_t pmap)
 	pmap->pm_pml4[PML4PML4I] = VM_PAGE_TO_PHYS(pml4pg) | PG_V | PG_RW | PG_A | PG_M;
 
 	pmap->pm_root = NULL;
+	pmap->pd_pm_root = NULL;
 	CPU_ZERO(&pmap->pm_active);
 	TAILQ_INIT(&pmap->pm_pvchunk);
 	bzero(&pmap->pm_stats, sizeof pmap->pm_stats);
@@ -1952,6 +2043,8 @@ pmap_release(pmap_t pmap)
 	    pmap->pm_stats.resident_count));
 	KASSERT(pmap->pm_root == NULL,
 	    ("pmap_release: pmap has reserved page table page(s)"));
+	KASSERT(pmap->pd_pm_root == NULL,
+	    ("pmap_release: pmap has reserved page directory page(s)"));
 
 	m = PHYS_TO_VM_PAGE(pmap->pm_pml4[PML4PML4I] & PG_FRAME);
 
