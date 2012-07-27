@@ -443,15 +443,14 @@ static int pmap_insert_pt_page(pmap_t pmap, vm_page_t mpte);
 static vm_page_t pmap_lookup_pt_page(pmap_t pmap, vm_offset_t va);
 static void pmap_remove_pt_page(pmap_t pmap, vm_page_t mpte);
 
-static int  pmap_insert_pd_page(pmap_t pmap, vm_page_t mpde) __attribute__ ((unused));
-static vm_page_t pmap_lookup_pd_page(pmap_t pmap, vm_offset_t va) __attribute__ ((unused));
-static void pmap_remove_pd_page(pmap_t pmap, vm_page_t mpte);
+static int  pmap_insert_pd_page(pmap_t pmap, vm_page_t mpde);
+static vm_page_t pmap_lookup_pd_page(pmap_t pmap, vm_offset_t va);
 
 static void pmap_kenter_attr(vm_offset_t va, vm_paddr_t pa, int mode);
 static void pmap_pde_attr(pd_entry_t *pde, int cache_bits, int mask);
 static void pmap_promote_pde(pmap_t pmap, pd_entry_t *pde, vm_offset_t va,
     struct rwlock **lockp);
-static void pmap_promote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va) __attribute__((unused));
+static void pmap_promote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va);
 static boolean_t pmap_protect_pde(pmap_t pmap, pd_entry_t *pde, vm_offset_t sva,
     vm_prot_t prot);
 static void pmap_pte_attr(pt_entry_t *pte, int cache_bits, int mask);
@@ -470,7 +469,7 @@ static void pmap_update_pde_invalidate(pmap_t, vm_offset_t va, pd_entry_t pde);
 
 static vm_page_t _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex,
 		struct rwlock **lockp);
-static vm_page_t pmap_alloc_pdpe(pmap_t pmap, vm_offset_t va, struct rwlock **lockp) __attribute__((unused));
+static vm_page_t pmap_alloc_pdpe(pmap_t pmap, vm_offset_t va, struct rwlock **lockp);
 static vm_page_t pmap_allocpde(pmap_t pmap, vm_offset_t va,
 		struct rwlock **lockp);
 static vm_page_t pmap_allocpte(pmap_t pmap, vm_offset_t va,
