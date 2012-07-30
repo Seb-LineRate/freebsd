@@ -2193,6 +2193,14 @@ pmap_growkernel(vm_offset_t addr)
 		addr = kernel_map->max_offset;
 	while (kernel_vm_end < addr) {
 		pdpe = pmap_pdpe(kernel_pmap, kernel_vm_end);
+		if (pdpe == NULL) {
+			nkpg = pmap_alloc_pdpe(kernel_pmap, kernel_vm_end, M_NOWAIT);
+			if (nkpg == NULL) {
+				panic("pmap_growkernel: no memory to grow kernel");
+			}
+			continue;  // retry
+		}
+
 		if ((*pdpe & PG_V) == 0) {
 			/* We need a new PDP entry */
 			nkpg = vm_page_alloc(NULL, kernel_vm_end >> PDPSHIFT,
