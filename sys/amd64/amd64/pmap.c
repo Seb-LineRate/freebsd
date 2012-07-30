@@ -626,8 +626,39 @@ pmap_pte(pmap_t pmap, vm_offset_t va)
 	pde = pmap_pde(pmap, va);
 	if (pde == NULL || (*pde & PG_V) == 0)
 		return (NULL);
-	if ((*pde & PG_PS) != 0)	/* compat with i386 pmap_pte() */
+	if ((*pde & PG_PS) == PG_PS) {
+		panic("pmap_pte() trying to get PT from a PDE with PS!  pde=%p (*pde=0x%016lx), va=0x%016lx", pde, *pde, va);
+	}
+	return (pmap_pde_to_pte(pde, va));
+}
+
+/* Return a pointer to the leaf-node page map entry that corresponds to a VA */
+/* this could be a PTE, or a PDE with PS, or a PDPE with PS */
+static __inline pt_entry_t *
+pmap_leaf_node(pmap_t pmap, vm_offset_t va)
+{
+	pdp_entry_t *pdpe;
+	pd_entry_t *pde;
+	pt_entry_t PG_V;
+
+	PG_V = pmap_valid_bit(pmap);
+	pdpe = pmap_pdpe(pmap, va);
+	if (pdpe == NULL || (*pdpe & PG_V) == 0) {
+		return NULL;
+	}
+	if ((*pdpe & PG_PS) == PG_PS) {
+		return ((pt_entry_t *)pdpe);
+	}
+
+	pde = pmap_pdpe_to_pde(pdpe, va);
+	KASSERT(pde != NULL, ("pmap_leaf_node: valid PDPE didn't yield a PDE?"));
+	if ((*pde & PG_V) == 0) {
+		return NULL;
+	}
+	if ((*pde & PG_PS) == PG_PS) {
 		return ((pt_entry_t *)pde);
+	}
+
 	return (pmap_pde_to_pte(pde, va));
 }
 
