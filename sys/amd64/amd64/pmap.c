@@ -4593,6 +4593,7 @@ pmap_clear_modify(vm_page_t m)
 					 */
 					va += VM_PAGE_TO_PHYS(m) - (oldpde &
 					    PG_PS_FRAME);
+					// FIXME: if the promotion failed, this will panic
 					pte = pmap_pde_to_pte(pde, va);
 					oldpte = *pte;
 					if ((oldpte & PG_V) != 0) {
