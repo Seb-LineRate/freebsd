@@ -1276,8 +1276,10 @@ pmap_extract(pmap_t pmap, vm_offset_t va)
 					    (va & PDRMASK);
 				} else {
 					pte = pmap_pde_to_pte(pde, va);
-					pa = (*pte & PG_FRAME) |
-					    (va & PAGE_MASK);
+					if ((*pte & PG_V) == PG_V) {
+						pa = (*pte & PG_FRAME) |
+						    (va & PAGE_MASK);
+					}
 				}
 			}
 		}
@@ -1317,7 +1319,7 @@ retry:
 			}
 		} else {
 			pdep = pmap_pdpe_to_pde(pdpe, va);
-			if (pdep != NULL && (pde = *pdep)) {
+			if (pdep != NULL && ((pde = *pdep) & PG_V)) {
 				if (pde & PG_PS) {
 					if ((pde & PG_RW) || (prot & VM_PROT_WRITE) == 0) {
 						if (vm_page_pa_tryrelock(pmap, (pde & PG_PS_FRAME) | (va & PDRMASK), &pa))
@@ -1326,7 +1328,10 @@ retry:
 						vm_page_hold(m);
 					}
 				} else {
-					pte = *pmap_pde_to_pte(pdep, va);
+					pt_entry_t *pte_p;
+					pte_p = pmap_pde_to_pte(pdep, va);
+					KASSERT(pte_p != NULL, ("pmap_extract_and_hold: pmap_pde_to_pte returned a NULL PTE from a valid PDE!"));
+					pte = *pte_p;
 					if ((pte & PG_V) && ((pte & PG_RW) || (prot & VM_PROT_WRITE) == 0)) {
 						if (vm_page_pa_tryrelock(pmap, (pde & PG_PS_FRAME) | (va & PDRMASK), &pa))
 							goto retry;
@@ -2255,6 +2260,7 @@ pmap_growkernel(vm_offset_t addr)
 			panic("pmap_growkernel() trying to get the PDT from a PDPT with ps!  addr=0x%016lx", addr);
 		}
 		pde = pmap_pdpe_to_pde(pdpe, kernel_vm_end);
+		KASSERT(pde != NULL, ("pmap_growkernel: got NULL PDE from a valid PDPE!"));
 		if ((*pde & PG_V) != 0) {
 			kernel_vm_end = (kernel_vm_end + NBPDR) & ~PDRMASK;
 			if (kernel_vm_end - 1 >= kernel_map->max_offset) {
@@ -3103,6 +3109,7 @@ pmap_remove_page(pmap_t pmap, vm_offset_t va, pd_entry_t *pde, vm_page_t *free)
 	if ((*pde & PG_V) == 0)
 		return;
 	pte = pmap_pde_to_pte(pde, va);
+	KASSERT(pte != NULL, ("pmap_remove_page: valid PDE produced a NULL PT!"));
 	if ((*pte & PG_V) == 0)
 		return;
 	pmap_remove_pte(pmap, pte, va, *pde, free);
@@ -3146,6 +3153,7 @@ pmap_remove(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
 		pdpe = pmap_pdpe(pmap, sva);
 		if ((pdpe != NULL) && ((*pdpe & (PG_PS | PG_V)) == PG_V)) {
 			pde = pmap_pdpe_to_pde(pdpe, sva);
+			KASSERT(pde != NULL, ("pmap_remove: NULL PDE from valid PDPE!"));
 			if ((*pde & (PG_PS | PG_V)) == PG_V) {
 				pmap_remove_page(pmap, sva, pde, &free);
 				goto out;
@@ -3189,12 +3197,13 @@ pmap_remove(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
 			va_next = eva;
 
 		pde = pmap_pdpe_to_pde(pdpe, sva);
+		KASSERT(pde != NULL, ("pmap_remove: got NULL PDE from a valid PDPE!"));
 		ptpaddr = *pde;
 
 		/*
 		 * Weed out invalid mappings.
 		 */
-		if (ptpaddr == 0)
+		if ((ptpaddr & PG_V) == 0)
 			continue;
 
 		/*
@@ -3232,7 +3241,8 @@ pmap_remove(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
 		va = va_next;
 		for (pte = pmap_pde_to_pte(pde, sva); sva != va_next; pte++,
 		    sva += PAGE_SIZE) {
-			if (*pte == 0) {
+			KASSERT(pte != NULL, ("pmap_remove: NULL PTE!"));
+			if ((*pte & PG_V) == 0) {
 				if (va != va_next) {
 					pmap_invalidate_range(pmap, va, sva);
 					va = va_next;
@@ -3309,11 +3319,17 @@ pmap_remove_all(vm_page_t m)
 		pmap = PV_PMAP(pv);
 		PMAP_LOCK(pmap);
 		va = pv->pv_va;
+
 		pdpe = pmap_pdpe(pmap, va);
 		KASSERT(pdpe != NULL, ("pmap_remove_all: got a NULL PDPE for a 2 meg PV mapping!"));
 		KASSERT((*pdpe & PG_V) == PG_V, ("pmap_remove_all: got an invalid PDPE for a 2 meg PV mapping!"));
 		KASSERT((*pdpe & PG_PS) != PG_PS, ("pmap_remove_all: got a PDPE with PS for a 2 meg PV mapping!"));
+
 		pde = pmap_pdpe_to_pde(pdpe, va);
+		KASSERT(pde != NULL, ("pmap_remove_all: got a NULL PDE for a 2 meg PV mapping!"));
+		KASSERT((*pde & PG_V) == PG_V, ("pmap_remove_all: got an invalid PDE for a 2 meg PV mapping!"));
+		KASSERT((*pde & PG_PS) == PG_PS, ("pmap_remove_all: got a PDE without PS for a 2 meg PV mapping!"));
+
 		(void)pmap_demote_pde(pmap, pde, va);
 		PMAP_UNLOCK(pmap);
 	}
@@ -3322,15 +3338,21 @@ small_mappings:
 		pmap = PV_PMAP(pv);
 		PMAP_LOCK(pmap);
 		pmap_resident_count_dec(pmap, 1);
-		pde = pmap_pde(pmap, pv->pv_va);
+
 		pdpe = pmap_pdpe(pmap, pv->pv_va);
 		KASSERT(pdpe != NULL, ("pmap_remove_all: got a NULL PDPE for a 4k PV mapping!"));
 		KASSERT((*pdpe & PG_V) == PG_V, ("pmap_remove_all: got an invalid PDPE for a 4k PV mapping!"));
 		KASSERT((*pdpe & PG_PS) != PG_PS, ("pmap_remove_all: got a PDPE with PS for a 4k PV mapping!"));
+
 		pde = pmap_pdpe_to_pde(pdpe, pv->pv_va);
+		KASSERT(pde != NULL, ("pmap_remove_all: got a NULL PDE for a 4k PV mapping!"));
+		KASSERT((*pde & PG_V) == PG_V, ("pmap_remove_all: got an invalid PDE for a 4k PV mapping!"));
 		KASSERT((*pde & PG_PS) == 0, ("pmap_remove_all: found"
 		    " a 2mpage in page %p's pv list", m));
+
 		pte = pmap_pde_to_pte(pde, pv->pv_va);
+		KASSERT(pte != NULL, ("pmap_remove_all: got a NULL PTE for a 4k PV mapping!"));
+		KASSERT((*pte & PG_V) == PG_V, ("pmap_remove_all: got an invalid PTE for a 4k PV mapping!"));
 		tpte = pte_load_clear(pte);
 		if (tpte & PG_W)
 			pmap->pm_stats.wired_count--;
@@ -3432,6 +3454,7 @@ resume:
 		}
 
 		pdpe = pmap_pml4e_to_pdpe(pml4e, sva);
+		KASSERT(pdpe != NULL, ("pmap_protect: NULL PDPE from a valid PML4E!"));
 		if ((*pdpe & PG_V) == 0) {
 			va_next = (sva + NBPDP) & ~PDPMASK;
 			if (va_next < sva)
@@ -3447,12 +3470,13 @@ resume:
 			panic("pmap_protect() trying to get a PDT from a PDPT with PS!  pmap=%p, sva=0x%016lx, eva=0x%016lx, prot=%x", pmap, sva, eva, prot);
 		}
 		pde = pmap_pdpe_to_pde(pdpe, sva);
+		KASSERT(pde != NULL, ("pmap_protect: NULL PDE from a valid PDPE!"));
 		ptpaddr = *pde;
 
 		/*
 		 * Weed out invalid mappings.
 		 */
-		if (ptpaddr == 0)
+		if ((ptpaddr & PG_V) == 0)
 			continue;
 
 		/*
@@ -3500,6 +3524,8 @@ resume:
 		    sva += PAGE_SIZE) {
 			pt_entry_t obits, pbits;
 			vm_page_t m;
+
+			KASSERT(pte != NULL, ("pmap_protect: got NULL PTE"));
 
 retry:
 			obits = pbits = *pte;
@@ -3820,6 +3846,8 @@ pmap_enter(pmap_t pmap, vm_offset_t va, vm_prot_t access, vm_page_t m,
 		if ((*pde & PG_PS) != 0)
 			panic("pmap_enter: attempted pmap_enter on 2MB page");
 		pte = pmap_pde_to_pte(pde, va);
+		KASSERT(pte != NULL, ("pmap_enter: NULL PTE from valid PDE!"));
+		// the PTE is allowed to be valid or invalid here
 	} else
 		panic("pmap_enter: invalid page directory va=%#lx", va);
 
@@ -4502,6 +4530,9 @@ retry:
 	}
 
 	pde = pmap_pdpe_to_pde(pdpe, va);
+	KASSERT(pde != NULL, ("pmap_change_wiring: got a NULL PDE from a valid PDPE"));
+	KASSERT((*pde & PG_V) == PG_V, ("pmap_change_wiring: invalid PDE"));
+
 	if ((*pde & PG_PS) != 0) {
 		if (!wired != ((*pde & PG_W) == 0)) {
 			if (!are_queues_locked) {
@@ -4518,6 +4549,8 @@ retry:
 			goto out;
 	}
 	pte = pmap_pde_to_pte(pde, va);
+	KASSERT(pte != NULL, ("pmap_change_wiring: NULL PT from a valid PDE?"));
+	KASSERT((*pte & PG_V) == PG_V, ("pmap_change_wiring: invalid PTE"));
 	if (wired && (*pte & PG_W) == 0) {
 		pmap->pm_stats.wired_count++;
 		atomic_set_long(pte, PG_W);
@@ -4593,8 +4626,9 @@ pmap_copy(pmap_t dst_pmap, pmap_t src_pmap, vm_offset_t dst_addr, vm_size_t len,
 			panic("pmap_copy() trying to get a PDT from a PDPT with PS!  dst_pmap=%p, src_pmap=%p, dst_addr=0x%016lx, len=%lu, src_addr=0x%016lx\n", dst_pmap, src_pmap, dst_addr, len, src_addr);
 		}
 		pde = pmap_pdpe_to_pde(pdpe, addr);
+		KASSERT(pde != NULL, ("pmap_copy: NULL PDE from a valid PDPE!"));
 		srcptepaddr = *pde;
-		if (srcptepaddr == 0)
+		if ((srcptepaddr & PG_V) == 0)
 			continue;
 			
 		if (srcptepaddr & PG_PS) {
@@ -4900,8 +4934,11 @@ pmap_remove_pages(pmap_t pmap)
 					pte_is_pdpe = 1;
 				} else {
 					pte = pmap_pdpe_to_pde(pte, pv->pv_va);
+					KASSERT(pte != NULL, ("pmap_remove_pages: NULL PDE from a valid PDPE!"));
 					tpte = *pte;
-					if ((tpte & (PG_PS | PG_V)) == PG_V) {
+					if ((tpte & PG_V) == 0)
+						panic("bad pte");
+					if ((tpte & PG_PS) == 0) {
 						ptepde = tpte;
 						pte = (pt_entry_t *)PHYS_TO_DMAP(tpte & PG_FRAME);
 						pte = &pte[pmap_pte_index(pv->pv_va)];
@@ -4910,8 +4947,6 @@ pmap_remove_pages(pmap_t pmap)
 					} else {
 						number_of_4k_pages = NBPDR / PAGE_SIZE;
 					}
-					if ((tpte & PG_V) == 0)
-						panic("bad pte");
 				}
 
 /*
@@ -5091,6 +5126,7 @@ pmap_is_prefaultable(pmap_t pmap, vm_offset_t addr)
 		pde = pmap_pdpe_to_pde(pdpe, addr);
 		if (pde != NULL && (*pde & (PG_PS | PG_V)) == PG_V) {
 			pte = pmap_pde_to_pte(pde, addr);
+			KASSERT(pte != NULL, ("pmap_is_prefaultable: NULL PTE from a valid PDE?"));
 			rv = (*pte & PG_V) == 0;
 		}
 	}
@@ -5192,12 +5228,17 @@ small_mappings:
 	TAILQ_FOREACH(pv, &m->md.pv_list, pv_list) {
 		pmap = PV_PMAP(pv);
 		PMAP_LOCK(pmap);
+
 		pde = pmap_pde(pmap, pv->pv_va);
 		KASSERT(pde != NULL, ("pmap_remove_write: got a NULL PDE from a 4k page's PV list!"));
 		KASSERT((*pde & PG_V) == PG_V, ("pmap_remove_write: got an invalid PDE from a 4k page's PV list!"));
 		KASSERT((*pde & PG_PS) == 0, ("pmap_clear_write: found"
 		    " a 2mpage in page %p's pv list", m));
+
 		pte = pmap_pde_to_pte(pde, pv->pv_va);
+		KASSERT(pte != NULL, ("pmap_remove_write: got a NULL PT from a 4k page's PV list!"));
+		KASSERT((*pte & PG_V) == PG_V, ("pmap_remove_write: got an invalid PTE from a 4k page's PV list!"));
+
 retry:
 		oldpte = *pte;
 		if (oldpte & PG_RW) {
@@ -5285,11 +5326,16 @@ small_mappings:
 			TAILQ_INSERT_TAIL(&m->md.pv_list, pv, pv_list);
 			pmap = PV_PMAP(pv);
 			PMAP_LOCK(pmap);
+
 			pde = pmap_pde(pmap, pv->pv_va);
 			KASSERT(pde != NULL, ("pmap_ts_referenced: got a NULL PDE from a 4k page's PV list!"));
 			KASSERT((*pde & PG_V) == PG_V, ("pmap_ts_referenced: got an invalid PDE from a 4k page's PV list!"));
 			KASSERT((*pde & PG_PS) != PG_PS, ("pmap_ts_referenced: got a PDE with PS in a 4k page's PV list"));
+
 			pte = pmap_pde_to_pte(pde, pv->pv_va);
+			KASSERT(pte != NULL, ("pmap_ts_referenced: got a NULL PTE from a 4k page's PV list!"));
+			KASSERT((*pte & PG_V) == PG_V, ("pmap_ts_referenced: got an invalid PTE from a 4k page's PV list!"));
+
 			if ((*pte & PG_A) != 0) {
 				atomic_clear_long(pte, PG_A);
 				pmap_invalidate_page(pmap, pv->pv_va);
@@ -5343,6 +5389,7 @@ pmap_clear_modify(vm_page_t m)
 		KASSERT(pde != NULL, ("pmap_clear_modify: got a NULL PDE from a 2 meg PV list!"));
 		KASSERT((*pde & PG_V) == PG_V, ("pmap_clear_modify: got an invalid PDE from a 2 meg PV list!"));
 		KASSERT((*pde & PG_PS) == PG_PS, ("pmap_clear_modify: got a PDE without PS in a 2 meg PV list"));
+
 		oldpde = *pde;
 		if ((oldpde & PG_RW) != 0) {
 			if (pmap_demote_pde(pmap, pde, va)) {
@@ -5356,6 +5403,7 @@ pmap_clear_modify(vm_page_t m)
 					    PG_PS_FRAME);
 					// FIXME: if the promotion failed, this will panic
 					pte = pmap_pde_to_pte(pde, va);
+					KASSERT(pte != NULL, ("pmap_clear_modify: got a NULL PTE from a freshly-demoted PDE!"));
 					oldpte = *pte;
 					if ((oldpte & PG_V) != 0) {
 						while (!atomic_cmpset_long(pte,
@@ -5374,12 +5422,17 @@ small_mappings:
 	TAILQ_FOREACH(pv, &m->md.pv_list, pv_list) {
 		pmap = PV_PMAP(pv);
 		PMAP_LOCK(pmap);
+
 		pde = pmap_pde(pmap, pv->pv_va);
 		KASSERT(pde != NULL, ("pmap_clear_modify: got a NULL PDE from a 4k page's PV list!"));
 		KASSERT((*pde & PG_V) == PG_V, ("pmap_clear_modify: got an invalid PDE from a 4k page's PV list!"));
 		KASSERT((*pde & PG_PS) == 0, ("pmap_clear_modify: found"
 		    " a 2mpage in page %p's pv list", m));
+
 		pte = pmap_pde_to_pte(pde, pv->pv_va);
+		KASSERT(pte != NULL, ("pmap_clear_modify: got a NULL PTE from a 4k page's PV list!"));
+		KASSERT((*pte & PG_V) == PG_V, ("pmap_clear_modify: got an invalid PTE from a 4k page's PV list!"));
+
 		if ((*pte & (PG_M | PG_RW)) == (PG_M | PG_RW)) {
 			atomic_clear_long(pte, PG_M);
 			pmap_invalidate_page(pmap, pv->pv_va);
@@ -5439,12 +5492,17 @@ small_mappings:
 	TAILQ_FOREACH(pv, &m->md.pv_list, pv_list) {
 		pmap = PV_PMAP(pv);
 		PMAP_LOCK(pmap);
+
 		pde = pmap_pde(pmap, pv->pv_va);
 		KASSERT(pde != NULL, ("pmap_clear_reference: got a NULL PDE from a 4k page's PV list!"));
 		KASSERT((*pde & PG_V) == PG_V, ("pmap_clear_reference: got an invalid PDE from a 4k page's PV list!"));
 		KASSERT((*pde & PG_PS) == 0, ("pmap_clear_reference: found"
 		    " a 2mpage in page %p's pv list", m));
+
 		pte = pmap_pde_to_pte(pde, pv->pv_va);
+		KASSERT(pte != NULL, ("pmap_clear_reference: got a NULL PTE from a 4k page's PV list!"));
+		KASSERT((*pte & PG_V) == PG_V, ("pmap_clear_reference: got an invalid PTE from a 4k page's PV list!"));
+
 		if (*pte & PG_A) {
 			atomic_clear_long(pte, PG_A);
 			pmap_invalidate_page(pmap, pv->pv_va);
@@ -5737,6 +5795,7 @@ pmap_change_attr_locked(vm_offset_t va, vm_size_t size, int mode)
 				return (ENOMEM);
 		}
 		pde = pmap_pdpe_to_pde(pdpe, tmpva);
+		KASSERT(pde != NULL, ("pmap_change_attr_locked: NULL PDE from a valid PDPE!"));
 		if ((*pde & PG_V) == 0) {
 			return (EINVAL);
 		}
@@ -5765,7 +5824,8 @@ pmap_change_attr_locked(vm_offset_t va, vm_size_t size, int mode)
 				return (ENOMEM);
 		}
 		pte = pmap_pde_to_pte(pde, tmpva);
-		if (*pte == 0)
+		KASSERT(pte != NULL, ("pmap_change_attr_locked: NULL PT from a valid PDE!"));
+		if ((*pte & PG_V) == 0)
 			return (EINVAL);
 		tmpva += PAGE_SIZE;
 	}
@@ -5779,6 +5839,8 @@ pmap_change_attr_locked(vm_offset_t va, vm_size_t size, int mode)
 	for (tmpva = base; tmpva < base + size; ) {
 		pdpe = pmap_pdpe(kernel_pmap, tmpva);
 		// we already checked all the PDPEs in the for loop above
+		// they're all not NULL and they all have PG_V, or we would
+		// have returned already
 		if (*pdpe & PG_PS) {
 			if ((*pdpe & PG_PDE_CACHE) != cache_bits_pde) {
 				pmap_pde_attr(pdpe, cache_bits_pde);
@@ -5807,6 +5869,8 @@ pmap_change_attr_locked(vm_offset_t va, vm_size_t size, int mode)
 			continue;
 		}
 		pde = pmap_pdpe_to_pde(pdpe, tmpva);
+		KASSERT(pde != NULL, ("pmap_change_attr_locked: NULL PDE from a valid PDPE!"));
+		KASSERT((*pde & PG_V) == PG_V, ("pmap_change_attr_locked: invalid PDE!"));
 		if (*pde & PG_PS) {
 			if ((*pde & PG_PDE_CACHE) != cache_bits_pde) {
 				pmap_pde_attr(pde, cache_bits_pde);
@@ -5834,6 +5898,8 @@ pmap_change_attr_locked(vm_offset_t va, vm_size_t size, int mode)
 			tmpva = trunc_2mpage(tmpva) + NBPDR;
 		} else {
 			pte = pmap_pde_to_pte(pde, tmpva);
+			KASSERT(pte != NULL, ("pmap_change_attr_locked: NULL PTE from a valid PDE!"));
+			KASSERT((*pte & PG_V) == PG_V, ("pmap_change_attr_locked: invalid PTE!"));
 			if ((*pte & PG_PTE_CACHE) != cache_bits_pte) {
 				pmap_pte_attr(pte, cache_bits_pte);
 				changed = TRUE;
@@ -5945,7 +6011,11 @@ retry:
 			    PG_FRAME;
 			val = MINCORE_SUPER;
 		} else {
-			pte = *pmap_pde_to_pte(pdep, addr);
+			pt_entry_t *pte_p;
+			pte_p = pmap_pde_to_pte(pdep, addr);
+			KASSERT(pte_p != NULL, ("pmap_mincore: NULL PTE from a valid PDE!"));
+			pte = *pte_p;
+			KASSERT((pte & PG_V) == PG_V, ("pmap_mincore: invalid PTE"));
 			pa = pte & PG_FRAME;
 			val = 0;
 		}
