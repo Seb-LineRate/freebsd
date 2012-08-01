@@ -2996,6 +2996,13 @@ pmap_remove(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
 				va_next = eva;
 			continue;
 		}
+		if ((*pdpe & PG_PS) == PG_PS) {
+			if (!pmap_demote_pdpe(pmap, pdpe, sva)) {
+				// the 1 gig page couldn't be demoted and was destroyed :-(
+				va_next = (sva + NBPDP) & ~PDPMASK;
+				continue;
+			}
+		}
 
 		/*
 		 * Calculate index for next page table.
