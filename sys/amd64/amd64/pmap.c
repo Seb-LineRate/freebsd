@@ -4921,8 +4921,8 @@ pmap_change_attr_locked(vm_offset_t va, vm_size_t size, int mode)
 	changed = FALSE;
 
 	/*
-	 * Pages that aren't mapped aren't supported.  Also break down 2MB pages
-	 * into 4KB pages if required.
+	 * Pages that aren't mapped aren't supported.  Also break down 1GB
+	 * and 2MB pages into 4KB pages if required.
 	 */
 	for (tmpva = base; tmpva < base + size; ) {
 		pdpe = pmap_pdpe(kernel_pmap, tmpva);
