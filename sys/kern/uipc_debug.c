@@ -36,6 +36,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/domain.h>
 #include <sys/kernel.h>
+#include <sys/mbuf.h>
 #include <sys/protosw.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
@@ -477,6 +478,78 @@ db_print_socket(struct socket *so, const char *socketname, int indent)
 	db_print_sockbuf(&so->so_snd, "so_snd", indent);
 }
 
+static void
+db_print_mbuf_flags(int mh_flags)
+{
+	if (mh_flags & M_EXT)
+		db_printf("M_EXT ");
+	if (mh_flags & M_PKTHDR)
+		db_printf("M_PKTHDR ");
+	if (mh_flags & M_EOR)
+		db_printf("M_EOR ");
+	if (mh_flags & M_RDONLY)
+		db_printf("M_RDONLY ");
+	if (mh_flags & M_PROTO1)
+		db_printf("M_PROTO1 ");
+	if (mh_flags & M_PROTO2)
+		db_printf("M_PROTO2 ");
+	if (mh_flags & M_PROTO3)
+		db_printf("M_PROTO3 ");
+	if (mh_flags & M_PROTO4)
+		db_printf("M_PROTO4 ");
+	if (mh_flags & M_PROTO5)
+		db_printf("M_PROTO5 ");
+	if (mh_flags & M_BCAST)
+		db_printf("M_BCAST ");
+	if (mh_flags & M_MCAST)
+		db_printf("M_MCAST ");
+	if (mh_flags & M_FRAG)
+		db_printf("M_FRAG ");
+	if (mh_flags & M_FIRSTFRAG)
+		db_printf("M_FIRSTFRAG ");
+	if (mh_flags & M_LASTFRAG)
+		db_printf("M_LASTFRAG ");
+	if (mh_flags & M_SKIP_FIREWALL)
+		db_printf("M_FIREWALL ");
+	if (mh_flags & M_FREELIST)
+		db_printf("M_FREELIST ");
+	if (mh_flags & M_VLANTAG)
+		db_printf("M_VLANTAG ");
+	if (mh_flags & M_PROMISC)
+		db_printf("M_PROMISC ");
+	if (mh_flags & M_NOFREE)
+		db_printf("M_NOFREE ");
+	if (mh_flags & M_PROTO6)
+		db_printf("M_PROTO6 ");
+	if (mh_flags & M_PROTO7)
+		db_printf("M_PROTO7 ");
+	if (mh_flags & M_PROTO8)
+		db_printf("M_PROTO8 ");
+	if (mh_flags & M_FLOWID)
+		db_printf("M_FLOWID ");
+}
+
+static void
+db_print_mbuf(struct mbuf *m, const char *mname, int indent)
+{
+
+	db_print_indent(indent);
+	db_printf("%s at %p\n", mname, m);
+
+	indent += 2;
+
+	db_print_indent(indent);
+	db_printf("mh_next: 0x%p ", m->m_hdr.mh_next);
+	db_printf("mh_nextpkt: 0x%p ", m->m_hdr.mh_nextpkt);
+	db_printf("mh_data: 0x%p\n", m->m_hdr.mh_data);
+	db_print_indent(indent);
+	db_printf("mh_len: %d ", m->m_hdr.mh_len);
+	db_printf("mh_flags: ");
+	db_print_mbuf_flags(m->m_hdr.mh_flags);
+	db_printf(" (0x%x) ", m->m_hdr.mh_flags);
+	db_printf("mh_type: %d\n", m->m_hdr.mh_type);
+}
+
 DB_SHOW_COMMAND(socket, db_show_socket)
 {
 	struct socket *so;
@@ -527,5 +600,18 @@ DB_SHOW_COMMAND(domain, db_show_domain)
 	d = (struct domain *)addr;
 
 	db_print_domain(d, "domain", 0);
+}
+
+DB_SHOW_COMMAND(mbuf, db_show_mbuf)
+{
+	struct mbuf *m;
+
+	if (!have_addr) {
+		db_printf("usage: show mbuf <addr>\n");
+		return;
+	}
+	m = (struct mbuf *)addr;
+
+	db_print_mbuf(m, "mbuf", 0);
 }
 #endif
