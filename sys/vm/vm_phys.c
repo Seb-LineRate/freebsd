@@ -135,6 +135,9 @@ SYSCTL_ULONG(_lros_debug, OID_AUTO, pointer_to_dump_pmap, CTLFLAG_RW, &vm_pointe
 static int sysctl_dump_pmap(SYSCTL_HANDLER_ARGS);
 SYSCTL_PROC(_lros_debug, OID_AUTO, dump_pmap, CTLTYPE_STRING | CTLFLAG_RD, NULL, 0, sysctl_dump_pmap, "A", "Process pmap");
 
+static int sysctl_dump_kern_pmap_pagesizes(SYSCTL_HANDLER_ARGS);
+SYSCTL_PROC(_lros_debug, OID_AUTO, dump_kern_pmap_pagesizes, CTLTYPE_STRING | CTLFLAG_RD, NULL, 0, sysctl_dump_kern_pmap_pagesizes, "A", "Kernel pmap pagesizes");
+
 /*
  * Outputs the state of the physical memory allocator, specifically,
  * the amount of physical memory in each free list.
@@ -230,7 +233,106 @@ sysctl_vm_phys_lookup_lists(SYSCTL_HANDLER_ARGS)
 	return (error);
 }
 #endif
-	
+
+
+static int
+sysctl_dump_kern_pmap_pagesizes(SYSCTL_HANDLER_ARGS)
+{
+	struct sbuf *sb;
+	int error;
+
+        int pml4e_index;
+
+        int num_1gig_pages = 0;
+        int num_2meg_pages = 0;
+        int num_4k_pages = 0;
+
+	sb = sbuf_new(NULL, NULL, 20 * 1024, SBUF_FIXEDLEN);
+	if (sb == NULL) {
+		printf("out of memory in lros.dump_kern_pmap_pagesizes sysctl\n");
+		return ENOMEM;
+	}
+
+	sbuf_printf(sb, "count of pagesizes in kernel pmap:\n");
+
+        PMAP_LOCK(kernel_pmap);
+
+        // walk from the page map tree from the top, counting number of physical frames as we go
+        for (pml4e_index = 0; pml4e_index < NPML4EPG; pml4e_index ++) {
+            pml4_entry_t pml4e;
+            pdp_entry_t *pdpt;
+            int pdpe_index;
+
+            pml4e = kernel_pmap->pm_pml4[pml4e_index];
+            if ((pml4e & PG_V) == 0) {
+                continue;
+            }
+
+            pdpt = (void*)PHYS_TO_DMAP(pml4e & PG_FRAME);
+
+            for (pdpe_index = 0; pdpe_index < NPDPEPG; pdpe_index ++) {
+                pdp_entry_t pdpe;
+                pd_entry_t *pdt;
+                int pde_index;
+
+                pdpe = pdpt[pdpe_index];
+                if ((pdpe & PG_V) == 0) {
+                    continue;
+                }
+
+                if ((pdpe & PG_PS) == PG_PS) {
+                    vm_offset_t va;
+                    num_1gig_pages ++;
+                    va = ((unsigned long)pml4e_index << 39) + ((unsigned long)pdpe_index << 30);
+                    sbuf_printf(sb, "    1 gig page at va 0x%016lx, pa 0x%016lx\n", va, pdpe & PG_FRAME);
+                    continue;
+                }
+
+                pdt = (void*)PHYS_TO_DMAP(pdpe & PG_FRAME);
+
+                for (pde_index = 0; pde_index < NPDEPG; pde_index ++) {
+                    pd_entry_t pde;
+                    pt_entry_t *pt;
+                    int pte_index;
+
+                    pde = pdt[pde_index];
+                    if ((pde & PG_V) == 0) {
+                        continue;
+                    }
+
+                    if ((pde & PG_PS) == PG_PS) {
+                        num_2meg_pages ++;
+                        continue;
+                    }
+
+                    pt = (void*)PHYS_TO_DMAP(pde & PG_FRAME);
+
+                    for (pte_index = 0; pte_index < NPTEPG; pte_index ++) {
+                        pt_entry_t pte;
+
+                        pte = pt[pte_index];
+                        if ((pte & PG_V) == 0) {
+                            continue;
+                        }
+
+                        num_4k_pages ++;
+                    }
+                }
+            }
+        }
+
+	PMAP_UNLOCK(kernel_pmap);
+
+	sbuf_printf(sb, "    1 gig: %10d\n", num_1gig_pages);
+	sbuf_printf(sb, "    2 meg: %10d\n", num_2meg_pages);
+	sbuf_printf(sb, "    4 k:   %10d\n", num_4k_pages);
+
+	sbuf_finish(sb);
+	error = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
+	sbuf_delete(sb);
+	return (error);
+}
+
 
 /*
  * These functions emit the page map of a virtual address in a pid, via a
