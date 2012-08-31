@@ -55,10 +55,18 @@ vm_offset_t kmem_alloc_attr(struct vmem *, vm_size_t size, int flags,
 vm_offset_t kmem_alloc_contig(struct vmem *, vm_size_t size, int flags,
     vm_paddr_t low, vm_paddr_t high, u_long alignment, vm_paddr_t boundary,
     vm_memattr_t memattr);
+
 vm_offset_t kmem_malloc(struct vmem *, vm_size_t size, int flags);
+vm_offset_t kmem_malloc_1gig(struct vmem *, vm_size_t size, int flags);
+vm_offset_t kmem_malloc_1gig_page(struct vmem *, int flags);
+vm_offset_t kmem_malloc_real(struct vmem *, vm_size_t size, int flags);
+
 void kmem_free(struct vmem *, vm_offset_t, vm_size_t);
+void kmem_free_1gig(struct vmem *, vm_offset_t, vm_size_t);
+void kmem_free_real(struct vmem *, vm_offset_t addr, vm_size_t size);
 
 /* This provides memory for previously allocated address space. */
+int kmem_back_1gb(vm_object_t object, vm_offset_t addr, int flags);
 int kmem_back(vm_object_t, vm_offset_t, vm_size_t, int);
 void kmem_unback(vm_object_t, vm_offset_t, vm_size_t);
 

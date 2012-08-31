@@ -84,6 +84,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_pageout.h>
+#include <vm/vm_phys.h>
 #include <vm/vm_extern.h>
 #include <vm/uma.h>
 
@@ -308,6 +309,12 @@ kmem_suballoc(vm_map_t parent, vm_offset_t *min, vm_offset_t *max,
 vm_offset_t
 kmem_malloc(struct vmem *vmem, vm_size_t size, int flags)
 {
+    return kmem_malloc_1gig(vmem, size, flags);
+}
+
+vm_offset_t
+kmem_malloc_real(struct vmem *vmem, vm_size_t size, int flags)
+{
 	vm_offset_t addr;
 	int rv;
 
@@ -322,6 +329,89 @@ kmem_malloc(struct vmem *vmem, vm_size_t size, int flags)
 		return (0);
 	}
 	return (addr);
+}
+
+int
+kmem_back_1gb(vm_object_t object, vm_offset_t addr, int flags)
+{
+	vm_offset_t offset, i;
+	vm_page_t m;
+	int pflags;
+	unsigned long num_4k_pages;
+
+	KASSERT(object == kmem_object || object == kernel_object,
+	    ("kmem_back: only supports kernel objects."));
+
+	offset = addr - VM_MIN_KERNEL_ADDRESS;
+	pflags = malloc2vm_flags(flags) | VM_ALLOC_NOBUSY | VM_ALLOC_WIRED;
+
+	VM_OBJECT_WLOCK(object);
+
+	num_4k_pages = (1024 * 1024 * 1024) / PAGE_SIZE;
+
+retry:
+	m = vm_phys_alloc_contig(
+		num_4k_pages,
+		0,			// lowest physical address i want
+		-1,			// highest physical address i want
+		(1024*1024*1024),	// alignment, 1 GB
+		0			// "boundary", 0 means ignore
+	);
+	if (m == NULL) {
+		if ((flags & M_NOWAIT) == 0) {
+			VM_OBJECT_WUNLOCK(object);
+			VM_WAIT;
+			VM_OBJECT_WLOCK(object);
+			goto retry;
+		}
+		VM_OBJECT_WUNLOCK(object);
+                return KERN_NO_SPACE;
+	}
+
+#ifdef INVARIANTS
+	// Verify that the array of pages we got from vm_phys_alloc_contig()
+	// is aligned on a 1 GB boundary.
+	KASSERT(
+		(m[0].phys_addr % (1024*1024*1024)) == 0,
+		("pages from vm_phys_alloc_contig() are not aligned on a 1 GB boundary!");
+	);
+
+	// Verify that all the pages are in order and physically contiguous.
+	{
+		int i;
+		for (i = 1; i < num_4k_pages; i++) {
+			vm_page_t m_tmp = &m[i];
+			vm_page_t m_prev = &m[i-1];
+			KASSERT(
+				m_tmp->phys_addr == (m_prev->phys_addr + PAGE_SIZE),
+				(
+					"page (pindex=%ld, phys_addr=0x%016lx) not contiguous with prev!",
+					m_tmp->pindex,
+					m_tmp->phys_addr
+				)
+			);
+		}
+	}
+#endif
+
+	for (i = 0; i < num_4k_pages; i++) {
+		vm_page_t m_tmp = &m[i];
+
+		if (flags & M_ZERO && (m_tmp->flags & PG_ZERO) == 0) {
+			pmap_zero_page(m_tmp);
+		}
+		KASSERT(
+			(m_tmp->oflags & VPO_UNMANAGED) != 0,
+			("kmem_back_1gb: page %p is managed", m_tmp)
+		);
+		m_tmp->valid = VM_PAGE_BITS_ALL;
+	}
+
+	pmap_enter_object_1gb(kernel_pmap, addr, m, VM_PROT_ALL);
+
+	VM_OBJECT_WUNLOCK(object);
+
+	return (KERN_SUCCESS);
 }
 
 /*
@@ -417,11 +507,52 @@ kmem_unback(vm_object_t object, vm_offset_t addr, vm_size_t size)
 void
 kmem_free(struct vmem *vmem, vm_offset_t addr, vm_size_t size)
 {
+        kmem_free_1gig(vmem, addr, size);
+}
 
+void
+kmem_free_real(struct vmem *vmem, vm_offset_t addr, vm_size_t size)
+{
 	size = round_page(size);
 	kmem_unback((vmem == kmem_arena) ? kmem_object : kernel_object,
 	    addr, size);
 	vmem_free(vmem, addr, size);
+}
+
+// allocate 1 gig of memory, mapped on a 1 gig page
+vm_offset_t
+kmem_malloc_1gig_page(struct vmem *vmem, int flags) {
+	vm_offset_t addr;
+	vm_size_t size, align;
+	int r;
+
+	size = align = 1024 * 1024 * 1024;
+
+	r = vmem_xalloc(
+		vmem,		// the user's passed-in arena
+		size,		// 1 GB size
+		align,		// 1 GB alignment
+		0,		// phase offset from the alignment
+		0,		// nocross, ignored
+		VMEM_ADDR_MIN,
+		VMEM_ADDR_MAX,
+		flags | M_BESTFIT,
+		&addr
+	);
+	if (r != 0) {
+		return (vm_offset_t)0;
+	}
+
+	r = kmem_back_1gb(
+	    (vmem == kmem_arena) ? kmem_object : kernel_object,
+            addr, flags
+        );
+        if (r != KERN_SUCCESS) {
+		vmem_xfree(vmem, addr, size);
+		return (vm_offset_t)0;
+	}
+
+        return addr;
 }
 
 /*
