@@ -49,10 +49,17 @@ vm_offset_t kmem_alloc_contig(vm_map_t map, vm_size_t size, int flags,
 vm_offset_t kmem_alloc_nofault(vm_map_t, vm_size_t);
 vm_offset_t kmem_alloc_nofault_space(vm_map_t, vm_size_t, int);
 vm_offset_t kmem_alloc_wait(vm_map_t, vm_size_t);
+
 void kmem_free(vm_map_t, vm_offset_t, vm_size_t);
+void kmem_free_1gig(vm_map_t, vm_offset_t, vm_size_t);
+void kmem_free_real(vm_map_t map, vm_offset_t addr, vm_size_t size);
+
 void kmem_free_wakeup(vm_map_t, vm_offset_t, vm_size_t);
 void kmem_init(vm_offset_t, vm_offset_t);
 vm_offset_t kmem_malloc(vm_map_t map, vm_size_t size, int flags);
+vm_offset_t kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags);
+vm_offset_t kmem_malloc_real(vm_map_t map, vm_size_t size, int flags);
+
 int kmem_back(vm_map_t, vm_offset_t, vm_size_t, int);
 vm_map_t kmem_suballoc(vm_map_t, vm_offset_t *, vm_offset_t *, vm_size_t,
     boolean_t);
