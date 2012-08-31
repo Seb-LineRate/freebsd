@@ -209,6 +209,15 @@ kmem_free(map, addr, size)
 	vm_offset_t addr;
 	vm_size_t size;
 {
+	kmem_free_real(map, addr, size);
+}
+
+void
+kmem_free_real(map, addr, size)
+	vm_map_t map;
+	vm_offset_t addr;
+	vm_size_t size;
+{
 
 	(void) vm_map_remove(map, trunc_page(addr), round_page(addr + size));
 }
@@ -270,6 +279,15 @@ kmem_suballoc(vm_map_t parent, vm_offset_t *min, vm_offset_t *max,
  */
 vm_offset_t
 kmem_malloc(map, size, flags)
+	vm_map_t map;
+	vm_size_t size;
+	int flags;
+{
+    return kmem_malloc_real(map, size, flags);
+}
+
+vm_offset_t
+kmem_malloc_real(map, size, flags)
 	vm_map_t map;
 	vm_size_t size;
 	int flags;
