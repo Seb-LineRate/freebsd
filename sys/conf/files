@@ -3359,6 +3359,7 @@ vm/sg_pager.c			standard
 vm/swap_pager.c			standard
 vm/uma_core.c			standard
 vm/uma_dbg.c			standard
+vm/vm_1gig_buddy.c              standard
 vm/vm_contig.c			standard
 vm/memguard.c			optional DEBUG_MEMGUARD
 vm/vm_fault.c			standard
