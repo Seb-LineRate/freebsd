@@ -58,6 +58,7 @@ void kmem_free_wakeup(vm_map_t, vm_offset_t, vm_size_t);
 void kmem_init(vm_offset_t, vm_offset_t);
 vm_offset_t kmem_malloc(vm_map_t map, vm_size_t size, int flags);
 vm_offset_t kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags);
+vm_offset_t kmem_malloc_1gig_page(vm_map_t map, int flags);
 vm_offset_t kmem_malloc_real(vm_map_t map, vm_size_t size, int flags);
 
 int kmem_back(vm_map_t, vm_offset_t, vm_size_t, int);
