@@ -1,9 +1,27 @@
 
+#include <sys/param.h>
+#include <sys/systm.h>
+#include <sys/kernel.h>		/* for ticks and hz */
+#include <sys/eventhandler.h>
+#include <sys/lock.h>
+#include <sys/mutex.h>
+#include <sys/proc.h>
 #include <sys/malloc.h>
-#include <vm/vm.h>
-#include <vm/vm_extern.h>
-#include <sys/sysctl.h>
+
 #include <sys/sbuf.h>
+#include <sys/sysctl.h>
+
+#include <vm/vm.h>
+#include <vm/vm_kern.h>
+#include <vm/vm_param.h>
+#include <vm/pmap.h>
+#include <vm/vm_map.h>
+#include <vm/vm_object.h>
+#include <vm/vm_page.h>
+#include <vm/vm_pageout.h>
+#include <vm/vm_phys.h>
+#include <vm/vm_extern.h>
+#include <vm/uma.h>
 
 
 //
@@ -206,7 +224,7 @@ kmem_1gig_add_page(void)
 
     printf("kmem_1gig_add_page: trying to add another gig\n");
 
-    va = kmem_malloc_real(kmem_map, one_gig, M_WAITOK);
+    va = kmem_malloc_1gig_page(kmem_map, M_WAITOK);
     if (va == 0) {
         printf("kmem_1gig_add_page: failed to allocate another gig\n");
         return NULL;
