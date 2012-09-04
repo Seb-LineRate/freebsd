@@ -82,6 +82,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_pageout.h>
+#include <vm/vm_phys.h>
 #include <vm/vm_extern.h>
 #include <vm/uma.h>
 
@@ -454,6 +455,172 @@ retry:
 	VM_OBJECT_UNLOCK(kmem_object);
 
 	return (KERN_SUCCESS);
+}
+
+// allocate 1 gig of memory, mapped on a 1 gig page
+vm_offset_t
+kmem_malloc_1gig_page(map, flags)
+	vm_map_t map;
+	int flags;
+{
+	vm_offset_t offset, i;
+	vm_map_entry_t entry;
+	vm_offset_t addr;
+	vm_page_t m;
+	int pflags;
+        unsigned long num_4k_pages;
+        vm_size_t size;
+
+        printf("kmem_malloc_1gig_page() starting\n");
+
+	size = 1024 * 1024 * 1024;
+        num_4k_pages = size / PAGE_SIZE;
+	addr = vm_map_min(map);
+
+	/*
+	 * Locate sufficient space in the map.  This will give us the final
+	 * virtual address for the new memory, and thus will tell us the
+	 * offset within the kernel map.
+	 */
+	vm_map_lock(map);
+	if (vm_map_findspace(map, vm_map_min(map), 2*size, &addr)) {
+		vm_map_unlock(map);
+                if ((flags & M_NOWAIT) == 0) {
+			for (i = 0; i < 8; i++) {
+				EVENTHANDLER_INVOKE(vm_lowmem, 0);
+				uma_reclaim();
+				vm_map_lock(map);
+				if (vm_map_findspace(map, vm_map_min(map),
+				    size, &addr) == 0) {
+					break;
+				}
+				vm_map_unlock(map);
+				tsleep(&i, 0, "nokva", (hz / 4) * (i + 1));
+			}
+			if (i == 8) {
+				panic("kmem_malloc_1gig(%ld): kmem_map too small: %ld total allocated",
+				    (long)size, (long)map->size);
+			}
+		} else {
+			return (0);
+		}
+	}
+        addr = (addr + (1024*1024*1024)) & ~((1024*1024*1024)-1);
+	offset = addr - VM_MIN_KERNEL_ADDRESS;
+	vm_object_reference(kmem_object);
+	vm_map_insert(map, kmem_object, offset, addr, addr + size,
+		VM_PROT_ALL, VM_PROT_ALL, 0);
+
+	if ((flags & (M_NOWAIT|M_USE_RESERVE)) == M_NOWAIT)
+		pflags = VM_ALLOC_INTERRUPT | VM_ALLOC_WIRED;
+	else
+		pflags = VM_ALLOC_SYSTEM | VM_ALLOC_WIRED;
+
+	if (flags & M_ZERO)
+		pflags |= VM_ALLOC_ZERO;
+
+	VM_OBJECT_LOCK(kmem_object);
+
+retry:
+        m = vm_phys_alloc_contig(
+            num_4k_pages,
+            0,               // lowest physical address i want
+            -1,              // highest physical address i want
+            1024*1024*1024,  // alignment, 1 GB
+            0                // "boundary", 0 means ignore
+        );
+        if (m == NULL) {
+            if ((flags & M_NOWAIT) == 0) {
+		VM_OBJECT_UNLOCK(kmem_object);
+		vm_map_unlock(map);
+		VM_WAIT;
+		vm_map_lock(map);
+		VM_OBJECT_LOCK(kmem_object);
+		goto retry;
+            }
+
+            /*
+             * Free the pages before removing the map entry.
+             * They are already marked busy.  Calling
+             * vm_map_delete before the pages has been freed or
+             * unbusied will cause a deadlock.
+             */
+            VM_OBJECT_UNLOCK(kmem_object);
+            vm_map_delete(map, addr, addr + size);
+            vm_map_unlock(map);
+            return (0);
+        }
+
+        // verify that the array of pages we got from vm_phys_alloc_contig()
+        // is aligned on a 1 GB boundary
+        KASSERT(
+            (m[0].phys_addr % (1024*1024*1024)) == 0,
+            ("pages from vm_phys_alloc_contig() are not aligned on a 1 GB boundary!");
+        );
+
+#ifdef INVARIANTS
+        //
+        // verify that all the pages are in order and physically contiguous
+        //
+        {
+            int i;
+
+            for (i = 1; i < num_4k_pages; i++) {
+                vm_page_t m_tmp = &m[i];
+                vm_page_t m_prev = &m[i-1];
+
+                KASSERT(
+                    m_tmp->phys_addr == (m_prev->phys_addr + PAGE_SIZE),
+                    (
+                        "page (pindex=%ld, phys_addr=0x%016lx) not contiguous with previous page!",
+                        m_tmp->pindex,
+                        m_tmp->phys_addr
+                    )
+                );
+            }
+        }
+#endif
+
+        for (i = 1; i < num_4k_pages; i++) {
+            vm_page_t m_tmp = &m[i];
+
+            if (flags & M_ZERO && (m_tmp->flags & PG_ZERO) == 0) {
+                pmap_zero_page(m_tmp);
+            }
+            m_tmp->valid = VM_PAGE_BITS_ALL;
+            KASSERT((m_tmp->flags & PG_UNMANAGED) != 0, ("kmem_malloc_1gig_page: page %p is managed", m_tmp));
+        }
+
+	VM_OBJECT_UNLOCK(kmem_object);
+
+	/*
+	 * Mark map entry as non-pageable. Assert: vm_map_insert() will never
+	 * be able to extend the previous entry so there will be a new entry
+	 * exactly corresponding to this address range and it will have
+	 * wired_count == 0.
+	 */
+	if (!vm_map_lookup_entry(map, addr, &entry) ||
+	    entry->start != addr || entry->end != addr + size ||
+	    entry->wired_count != 0)
+		panic("kmem_malloc_1gig_page: entry not found or misaligned");
+	entry->wired_count = 1;
+
+	/*
+	 * At this point, the kmem_object must be unlocked because
+	 * vm_map_simplify_entry() calls vm_object_deallocate(), which
+	 * locks the kmem_object.
+	 */
+	vm_map_simplify_entry(map, entry);
+
+	// enter pages into the pmap
+	VM_OBJECT_LOCK(kmem_object);
+        vm_page_lock_queues();
+        pmap_enter_object_1gb(kernel_pmap, addr, m, VM_PROT_ALL);
+        vm_page_unlock_queues();
+	VM_OBJECT_UNLOCK(kmem_object);
+	vm_map_unlock(map);
+
+	return (addr);
 }
 
 /*
