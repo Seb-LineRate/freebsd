@@ -2085,20 +2085,25 @@ pmap_allocpte(pmap_t pmap, vm_offset_t va, int flags)
 retry:
 	pdpe = pmap_pdpe(pmap, va);
 	if (pdpe == NULL) {
+                printf("pmap_allocpte: NULL pdpe!\n");
 		m = pmap_alloc_pdpe(pmap, va, flags);
 		if ((m == NULL) && (flags & M_NOWAIT)) {
+                        printf("pmap_allocpte: failed to allocate a page for the PDPT!\n");
 			return NULL;
 		}
 		goto retry;
 	}
 	if ((*pdpe & PG_V) == 0) {
+                printf("pmap_allocpte: invalid pdpe!\n");
 		m = pmap_allocpde(pmap, va, flags);
 		if ((m == NULL) && (flags & M_NOWAIT)) {
+                        printf("pmap_allocpte: failed to allocate a page for the PDT!\n");
 			return NULL;
 		}
 		goto retry;
 	}
 	if ((*pdpe & PG_PS) == PG_PS) {
+                printf("pmap_allocpte: superpage pdpe!\n");
 		if (!pmap_demote_pdpe(pmap, pdpe, va)) {
 			printf("on noes!  failed to demote a PDPE superpage!\n");
 			return NULL;
@@ -2664,7 +2669,10 @@ pmap_pv_demote_pdpe(pmap_t pmap, vm_offset_t va, vm_paddr_t pa)
 	vm_offset_t va_last;
 
 	// this can not end well...  :-(
-	if (pmap == kernel_pmap) return;
+	if (pmap == kernel_pmap) {
+                printf("pmap_pv_demote_pdpe() skipping PV demotion in kernel pmap...\n");
+		return;
+        }
 
 	rw_assert(&pvh_global_lock, RA_WLOCKED);
 	KASSERT((pa & PDPMASK) == 0,
@@ -4937,7 +4945,7 @@ pmap_remove_pages(pmap_t pmap)
 					KASSERT(pte != NULL, ("pmap_remove_pages: NULL PDE from a valid PDPE!"));
 					tpte = *pte;
 					if ((tpte & PG_V) == 0)
-						panic("bad pte");
+						panic("bad pte (lacks Valid bit)");
 					if ((tpte & PG_PS) == 0) {
 						ptepde = tpte;
 						pte = (pt_entry_t *)PHYS_TO_DMAP(tpte & PG_FRAME);
@@ -5625,6 +5633,8 @@ pmap_demote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va)
 	pd_entry_t *firstpde, newpde, *pde;
 	vm_paddr_t mpdepa;
 	vm_page_t mpde;
+
+        printf("demoting PDPE (pmap=%p, va=0x%016lx)\n", pmap, va);
 
 	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
 	oldpdpe = *pdpe;
