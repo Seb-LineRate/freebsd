@@ -1905,6 +1905,27 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
 	if ((m->flags & PG_ZERO) == 0)
 		pmap_zero_page(m);
 
+#ifdef INVARIANTS
+        // assert that the page is entirely zeroed
+        {
+            uint64_t *p;
+            uint64_t va;
+
+            va = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m));
+
+            for (
+                p = (uint64_t *)va;
+                p < (uint64_t *)(va + PAGE_SIZE);
+                p ++
+            ) {
+                if (*p != 0) {
+                    printf("m=%p, va=0x%016lx, p=%p, *p=0x%016lx\n", m, va, p, *p);
+                    panic("allocated page-map page is not zero!\n");
+                }
+            }
+        }
+#endif
+
 	/*
 	 * Map the pagetable page into the process address space, if
 	 * it isn't already there.
@@ -1917,6 +1938,7 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
 		/* Wire up a new PDPE page */
 		pml4index = ptepindex - (NUPDE + NUPDPE);
 		pml4 = &pmap->pm_pml4[pml4index];
+		KASSERT((*pml4 & PG_V) == 0, ("_pmap_allocpte(): pmap=%p, ptepindex=%ld, pml4index=%ld, valid PML4E!  (PML4E=0x%016lx)\n", pmap, ptepindex, pml4index, *pml4));
 		*pml4 = VM_PAGE_TO_PHYS(m) | PG_U | PG_RW | PG_V | PG_A | PG_M;
 
 	} else if (ptepindex >= NUPDE) {
@@ -1948,6 +1970,7 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
 
 		/* Now find the pdp page */
 		pdp = &pdp[pdpindex & ((1ul << NPDPEPGSHIFT) - 1)];
+		KASSERT((*pdp & PG_V) == 0, ("_pmap_allocpte(): pmap=%p, ptepindex=%ld, pml4index=%ld, pdpindex=%ld, valid PDPE!  (PDPE=0x%016lx)\n", pmap, ptepindex, pml4index, pdpindex & 511, *pdp));
 		*pdp = VM_PAGE_TO_PHYS(m) | PG_U | PG_RW | PG_V | PG_A | PG_M;
 
 	} else {
@@ -1997,6 +2020,17 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
 
 		/* Now we know where the page directory page is */
 		pd = &pd[ptepindex & ((1ul << NPDEPGSHIFT) - 1)];
+		KASSERT(
+		    (*pd & PG_V) == 0,
+		    (
+			"_pmap_allocpte(): pmap=%p, ptepindex=%ld, pml4index=%ld, pdpindex=%ld, pdeindex=%ld, valid PDE!  (PDE=0x%016lx)\n",
+			pmap,
+			ptepindex,
+			pml4index,
+			(pdpindex >> 9) & 511,
+			ptepindex & 511, *pd
+		    )
+		);
 		*pd = VM_PAGE_TO_PHYS(m) | PG_U | PG_RW | PG_V | PG_A | PG_M;
 	}
 
