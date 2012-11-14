@@ -1902,8 +1902,10 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
 		 */
 		return (NULL);
 	}
-	if ((m->flags & PG_ZERO) == 0)
+	if (1 || (m->flags & PG_ZERO) == 0) {
+                // printf("_pmap_allocpte() zeroing page at %p\n", m);
 		pmap_zero_page(m);
+        }
 
 	/*
 	 * Map the pagetable page into the process address space, if
