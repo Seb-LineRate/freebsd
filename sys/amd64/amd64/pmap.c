@@ -1907,6 +1907,28 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
 		pmap_zero_page(m);
         }
 
+// #ifdef INVARIANTS
+        // assert that the page is entirely zeroed
+        {
+            uint64_t *p;
+            uint64_t va;
+
+            va = PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m));
+
+            for (
+                p = (uint64_t *)va;
+                p < (uint64_t *)(va + PAGE_SIZE);
+                p ++
+            ) {
+                if (*p != 0) {
+                    printf("m=%p, va=0x%016lx, p=%p, *p=0x%016lx\n", m, va, p, *p);
+                    panic("allocated page-map page is not zero!\n");
+                }
+            }
+            // printf("page-map page (m=%p) at pa=0x%016lx is all zeroed (ptepindex=0x%016lx)\n", m, VM_PAGE_TO_PHYS(m), ptepindex);
+        }
+// #endif
+
 	/*
 	 * Map the pagetable page into the process address space, if
 	 * it isn't already there.
