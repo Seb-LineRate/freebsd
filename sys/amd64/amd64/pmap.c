@@ -1907,7 +1907,7 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
 		pmap_zero_page(m);
         }
 
-// #ifdef INVARIANTS
+#ifdef INVARIANTS
         // assert that the page is entirely zeroed
         {
             uint64_t *p;
@@ -1927,7 +1927,7 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
             }
             // printf("page-map page (m=%p) at pa=0x%016lx is all zeroed (ptepindex=0x%016lx)\n", m, VM_PAGE_TO_PHYS(m), ptepindex);
         }
-// #endif
+#endif
 
 	/*
 	 * Map the pagetable page into the process address space, if
