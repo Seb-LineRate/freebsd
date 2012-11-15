@@ -985,6 +985,8 @@ vm_fault_1gb(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
 	hardfault = 0;
 	growstack = TRUE;
 	PCPU_INC(cnt.v_vm_faults);
+	fs.vp = NULL;
+	fs.vfslocked = 0;
 
 	/*
 	 * Find the backing store object and offset into it to begin the
