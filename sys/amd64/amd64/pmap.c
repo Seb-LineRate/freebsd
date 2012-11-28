@@ -5672,8 +5672,6 @@ pmap_demote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va)
 	vm_paddr_t mpdepa;
 	vm_page_t mpde;
 
-        printf("demoting PDPE (pmap=%p, va=0x%016lx)\n", pmap, va);
-
 	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
 	oldpdpe = *pdpe;
 	KASSERT((oldpdpe & (PG_PS | PG_V)) == (PG_PS | PG_V),
@@ -5712,8 +5710,9 @@ pmap_demote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va)
 
 	/*
 	 * Demote the mapping.
+	 * FIXME: look at how pmap_demote_pde() calls pmap_update_pde()
 	 */
-	*pdpe = newpdpe;
+	pdpe_store(pdpe, newpdpe);
 
 	/*
 	 * Demote the pv entry.
