@@ -2094,7 +2094,6 @@ static vm_page_t
 pmap_allocpte(pmap_t pmap, vm_offset_t va, int flags)
 {
 	vm_pindex_t ptepindex;
-	pdp_entry_t *pdpe;
 	pd_entry_t *pd;
 	vm_page_t m;
 
@@ -2107,35 +2106,10 @@ pmap_allocpte(pmap_t pmap, vm_offset_t va, int flags)
 	 */
 	ptepindex = pmap_pde_pindex(va);
 retry:
-	pdpe = pmap_pdpe(pmap, va);
-	if (pdpe == NULL) {
-                printf("pmap_allocpte: NULL pdpe!\n");
-		m = pmap_alloc_pdpe(pmap, va, flags);
-		if ((m == NULL) && (flags & M_NOWAIT)) {
-                        printf("pmap_allocpte: failed to allocate a page for the PDPT!\n");
-			return NULL;
-		}
-		goto retry;
-	}
-	if ((*pdpe & PG_V) == 0) {
-                printf("pmap_allocpte: invalid pdpe!\n");
-		m = pmap_allocpde(pmap, va, flags);
-		if ((m == NULL) && (flags & M_NOWAIT)) {
-                        printf("pmap_allocpte: failed to allocate a page for the PDT!\n");
-			return NULL;
-		}
-		goto retry;
-	}
-	if ((*pdpe & PG_PS) == PG_PS) {
-                printf("pmap_allocpte: superpage pdpe!\n");
-		if (!pmap_demote_pdpe(pmap, pdpe, va)) {
-			printf("on noes!  failed to demote a PDPE superpage!\n");
-			return NULL;
-		}
-		goto retry;
-	}
-
-	pd = pmap_pdpe_to_pde(pdpe, va);
+	/*
+	 * Get the page directory entry
+	 */
+	pd = pmap_pde(pmap, va);
 
 	/*
 	 * This supports switching from a 2MB page to a
