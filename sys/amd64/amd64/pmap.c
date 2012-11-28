@@ -1941,7 +1941,6 @@ _pmap_allocpte(pmap_t pmap, vm_pindex_t ptepindex, int flags)
                     panic("allocated page-map page is not zero!\n");
                 }
             }
-            // printf("page-map page (m=%p) at pa=0x%016lx is all zeroed (ptepindex=0x%016lx)\n", m, VM_PAGE_TO_PHYS(m), ptepindex);
         }
 #endif
 
