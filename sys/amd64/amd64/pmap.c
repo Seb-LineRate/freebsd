@@ -329,6 +329,12 @@ pmap_pde_pindex(vm_offset_t va)
 	return (va >> PDRSHIFT);
 }
 
+static __inline vm_pindex_t
+pmap_pdpe_pindex(vm_offset_t va)
+{
+	return (va >> PDPSHIFT);
+}
+
 
 /* Return various clipped indexes for a given VA */
 static __inline vm_pindex_t
@@ -5742,6 +5748,118 @@ pmap_demote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va)
 	    " in pmap %p", va, pmap);
 	return (TRUE);
 }
+
+
+
+
+
+
+
+#if 0
+/*
+ * Tries to demote a 1GB page mapping.
+ */
+static boolean_t
+pmap_demote_pdpe(pmap_t pmap, pdp_entry_t *pdpe, vm_offset_t va)
+{
+	pdp_entry_t newpdpe, oldpdpe;
+	pd_entry_t *firstpde, newpde, *pde;
+	vm_paddr_t mpdepa;
+	vm_page_t mpde;
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	oldpdpe = *pdpe;
+	KASSERT((oldpdpe & (PG_PS | PG_V)) == (PG_PS | PG_V),
+	    ("pmap_demote_pdpe: oldpdpe is missing PG_PS and/or PG_V"));
+
+	// look for a PD page in the pmap's cache
+	// allocate a new vm_page to hold the new PD if none is found in the cache
+	mpde = pmap_lookup_pd_page(pmap, va);
+	if (mpde == NULL) {
+                int flags;
+
+                KASSERT(
+                    (oldpdpe & PG_W) == 0,
+		    (
+                        "pmap_demote_pde: page table page for a wired mapping is missing (pmap=%p, pde=0x%016lx, va=0x%016lx)",
+                        pmap,
+                        *pde,
+                        va
+                    )
+                );
+
+                if ((va >= DMAP_MIN_ADDRESS) && (va < DMAP_MAX_ADDRESS)) {
+                    flags = VM_ALLOC_INTERRUPT;
+                } else {
+                    flags = VM_ALLOC_NORMAL;
+                }
+                flags |= VM_ALLOC_NOOBJ | VM_ALLOC_WIRED;
+		if (
+                    ((oldpdpe & PG_A) == 0)
+                    || ((mpde = vm_page_alloc(NULL, pmap_pdpe_pindex(va), flags)) == NULL)
+                ) {
+                        //vm_page_t free;
+			CTR2(KTR_PMAP, "pmap_demote_pdpe: failure for va %#lx"
+				" in pmap %p", va, pmap);
+                        // free = NULL;
+                        // pmap_remove_pdpe(pmap, pdpe, trunc_1gpage(va), &free);
+                        // pmap_invalidate_page(pmap, trunc_1gpage(va));;
+                        // pmap_free_zero_pages(free);
+			return (FALSE);
+		}
+                if (va < VM_MAXUSER_ADDRESS) {
+                    pmap_resident_count_inc(pmap, 1);
+                }
+	} else {
+		pmap_remove_pd_page(pmap, mpde);
+	}
+
+	mpdepa = VM_PAGE_TO_PHYS(mpde);
+	firstpde = (pd_entry_t *)PHYS_TO_DMAP(mpdepa);
+	newpdpe = mpdepa | PG_M | PG_A | (oldpdpe & PG_U) | PG_RW | PG_V;
+	KASSERT((oldpdpe & PG_A) != 0,
+	    ("pmap_demote_pdpe: oldpdpe is missing PG_A"));
+	KASSERT((oldpdpe & (PG_M | PG_RW)) != PG_RW,
+	    ("pmap_demote_pdpe: oldpdpe is missing PG_M"));
+	newpde = oldpdpe & ~PG_PS;
+	if ((newpde & PG_PDE_PAT) != 0)
+		newpde ^= PG_PDE_PAT | PG_PTE_PAT;
+
+	/*
+	 * If the page map page is new, initialize it.
+	 */
+	if (mpde->wire_count == 1) {
+		mpde->wire_count = NPDEPG;
+	}
+	for (pde = firstpde; pde < firstpde + NPDEPG; pde++) {
+		*pde = newpde;
+		newpde += NBPDR;
+	}
+
+	/*
+	 * Demote the mapping.
+         * FIXME: look at how pmap_demote_pde() calls pmap_update_pde()
+	 */
+	pdpe_store(pdpe, newpdpe);
+
+	/*
+	 * Invalidate a stale recursive mapping of the page directory page.
+	 */
+	pmap_invalidate_page(pmap, (vm_offset_t)vtopdpe(va));
+
+	/*
+	 * Demote the pv entry.
+	 */
+	if ((oldpdpe & PG_MANAGED) != 0)
+		pmap_pv_demote_pdpe(pmap, va, oldpdpe & PG_1GB_PS_FRAME);
+
+	pmap_pdpe_demotions++;
+	CTR2(KTR_PMAP, "pmap_demote_pdpe: success for va %#lx"
+	    " in pmap %p", va, pmap);
+	return (TRUE);
+}
+#endif
+
 
 /*
  * Sets the memory attribute for the specified page.
