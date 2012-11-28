@@ -2718,7 +2718,7 @@ pmap_pv_demote_pdpe(pmap_t pmap, vm_offset_t va, vm_paddr_t pa)
 
 	/*
 	 * Transfer the 1gpage's pv entry for this mapping to the first
-	 * page's pv list.
+	 * 2 MB page's pv list.
 	 */
 	pvh_1gb = pa_1gb_to_pvh(pa);
 	va = trunc_1gpage(va);
