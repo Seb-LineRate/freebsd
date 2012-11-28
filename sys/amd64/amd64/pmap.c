@@ -1312,9 +1312,9 @@ retry:
 	if ((pdpe != NULL) && ((*pdpe & PG_V) == PG_V)) {
 		if ((*pdpe & PG_PS) == PG_PS) {
 			if ((*pdpe & PG_RW) || (prot & VM_PROT_WRITE) == 0) {
-				if (vm_page_pa_tryrelock(pmap, (*pdpe & PG_PS_FRAME) | (va & PDRMASK), &pa))
+				if (vm_page_pa_tryrelock(pmap, (*pdpe & PG_1GB_PS_FRAME) | (va & PDPMASK), &pa))
 					goto retry;
-				m = PHYS_TO_VM_PAGE((*pdpe & PG_PS_FRAME) | (va & PDPMASK));
+				m = PHYS_TO_VM_PAGE((*pdpe & PG_1GB_PS_FRAME) | (va & PDPMASK));
 				vm_page_hold(m);
 			}
 		} else {
