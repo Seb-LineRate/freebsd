@@ -2251,8 +2251,25 @@ pmap_unwire_ptp(pmap_t pmap, vm_offset_t va, vm_page_t m, struct spglist *free)
 	if (m->wire_count == 0) {
 		_pmap_unwire_ptp(pmap, va, m, free);
 		return (TRUE);
-	} else
+	} else {
+#ifdef INVARIANTS
+		int i;
+		pd_entry_t *pde;
+		int found_one = 0;
+
+		pde = (pd_entry_t *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(m));
+		for (i = 0; i < 512; i ++) {
+			if (*pde != 0) {
+				found_one = 1;
+			}
+			pde ++;
+		}
+
+		KASSERT(found_one, ("pmap_unwire_pte_hold(): empty page map page has wire_count > 0!"));
+#endif
+
 		return (FALSE);
+	}
 }
 
 static void
