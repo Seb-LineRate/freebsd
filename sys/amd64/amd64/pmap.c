@@ -6104,6 +6104,9 @@ pmap_page_is_mapped(vm_page_t m)
 void
 pmap_remove_pages(pmap_t pmap)
 {
+	pdp_entry_t *pdpe;
+	pd_entry_t *pde;
+
 	pd_entry_t ptepde;
 	pt_entry_t *pte, tpte;
 	pt_entry_t PG_M, PG_RW, PG_V;
@@ -6161,18 +6164,20 @@ pmap_remove_pages(pmap_t pmap)
 				pv = &pc->pc_pventry[idx];
 				inuse &= ~bitmask;
 
-				pte = pmap_pdpe(pmap, pv->pv_va);
-				KASSERT(pte != NULL, ("pmap_remove_pages: got a NULL PDPE!"));
-				KASSERT((*pte & PG_V) == PG_V, ("pmap_remove_pages: got an invalid PDPE!"));
+				pdpe = pmap_pdpe(pmap, pv->pv_va);
+				KASSERT(pdpe != NULL, ("pmap_remove_pages: got a NULL PDPE!"));
+				KASSERT((*pdpe & PG_V) == PG_V, ("pmap_remove_pages: got an invalid PDPE!"));
+				pte = pdpe;
 				ptepde = *pte;
 
-				if ((*pte & PG_PS) == PG_PS) {
+				if ((*pdpe & PG_PS) == PG_PS) {
 					tpte = *pte;
 					number_of_4k_pages = NBPDP / PAGE_SIZE;
 					pte_is_pdpe = 1;
 				} else {
-					pte = pmap_pdpe_to_pde(pte, pv->pv_va);
-					KASSERT(pte != NULL, ("pmap_remove_pages: NULL PDE from a valid PDPE!"));
+					pde = pmap_pdpe_to_pde(pte, pv->pv_va);
+					KASSERT(pde != NULL, ("pmap_remove_pages: NULL PDE from a valid PDPE!"));
+					pte = pde;
 					tpte = *pte;
 					if ((tpte & (PG_PS | PG_V)) == PG_V) {
 						superpage = FALSE;
