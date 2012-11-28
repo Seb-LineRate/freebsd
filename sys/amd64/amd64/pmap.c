@@ -3790,7 +3790,7 @@ setpde:
 			oldpdeva = (oldpde & PG_FRAME & PDPMASK) |
 			    (va & ~PDPMASK);
 			CTR2(KTR_PMAP, "pmap_promote_pdpe: protect for va %#lx"
-			    " in pmap %p", oldpteva, pmap);
+			    " in pmap %p", oldpdeva, pmap);
 		}
 		if ((oldpde & PG_PDE_PROMOTE) != (newpdpe & PG_PDE_PROMOTE)) {
 			CTR2(KTR_PMAP, "pmap_promote_pdpe: failure for va %#lx"
