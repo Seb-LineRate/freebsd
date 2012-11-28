@@ -4937,6 +4937,9 @@ pmap_page_is_mapped(vm_page_t m)
 void
 pmap_remove_pages(pmap_t pmap)
 {
+	pdp_entry_t *pdpe;
+	pd_entry_t *pde;
+
 	pd_entry_t ptepde;
 	pt_entry_t *pte, tpte;
 	vm_page_t free = NULL;
@@ -4969,22 +4972,31 @@ pmap_remove_pages(pmap_t pmap)
 				pv = &pc->pc_pventry[idx];
 				inuse &= ~bitmask;
 
-				pte = pmap_pdpe(pmap, pv->pv_va);
-				KASSERT(pte != NULL, ("pmap_remove_pages: got a NULL PDPE!"));
-				KASSERT((*pte & PG_V) == PG_V, ("pmap_remove_pages: got an invalid PDPE!"));
+				pdpe = pmap_pdpe(pmap, pv->pv_va);
+				KASSERT(pdpe != NULL, ("pmap_remove_pages: got a NULL PDPE!"));
+				KASSERT((*pdpe & PG_V) == PG_V, ("pmap_remove_pages: got an invalid PDPE!"));
+				pte = pdpe;
 				ptepde = *pte;
 
-				if ((*pte & PG_PS) == PG_PS) {
+				if ((*pdpe & PG_PS) == PG_PS) {
 					tpte = *pte;
 					number_of_4k_pages = NBPDP / PAGE_SIZE;
 					pte_is_pdpe = 1;
 				} else {
-					pte = pmap_pdpe_to_pde(pte, pv->pv_va);
-					KASSERT(pte != NULL, ("pmap_remove_pages: NULL PDE from a valid PDPE!"));
+					pde = pmap_pdpe_to_pde(pte, pv->pv_va);
+					KASSERT(pde != NULL, ("pmap_remove_pages: NULL PDE from a valid PDPE!"));
+					pte = pde;
 					tpte = *pte;
-					if ((tpte & PG_V) == 0)
-						panic("bad pte (lacks Valid bit)");
+					if ((tpte & PG_V) == 0) {
+						printf("pmap_remove_pages(): bad PDE lacks Valid bit!\n");
+						printf("    va = 0x%016lx\n", pv->pv_va);
+						printf("    PML4E %ld = 0x%016lx\n", pmap_pml4e_index(pv->pv_va), *pmap_pml4e(pmap, pv->pv_va));
+						printf("    PDPE %ld = 0x%016lx\n", pmap_pdpe_index(pv->pv_va), *pmap_pdpe(pmap, pv->pv_va));
+						printf("    PDE %ld = 0x%016lx\n", pmap_pde_index(pv->pv_va), *pmap_pde(pmap, pv->pv_va));
+						panic("bad PDE lacks Valid bit");
+					}
 					if ((tpte & PG_PS) == 0) {
+						// freeing a boring old 4k page
 						ptepde = tpte;
 						pte = (pt_entry_t *)PHYS_TO_DMAP(tpte & PG_FRAME);
 						pte = &pte[pmap_pte_index(pv->pv_va)];
