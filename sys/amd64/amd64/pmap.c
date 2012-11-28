@@ -2188,6 +2188,18 @@ pmap_release(pmap_t pmap)
 	vm_page_t m;
 	int i;
 
+#ifdef INVARIANTS
+        // assert that the pmap's PML4 table is entirely zeroed
+        {
+            int i;
+            for (i = 0; i < 256; i++) {	/* user space */
+                if (pmap->pm_pml4[i] != 0) {
+                    panic("pmap_release: userspace PML4E %d = 0x%016lx\n", i, pmap->pm_pml4[i]);
+                }
+            }
+        }
+#endif
+
 	KASSERT(pmap->pm_stats.resident_count == 0,
 	    ("pmap_release: pmap resident count %ld != 0",
 	    pmap->pm_stats.resident_count));
