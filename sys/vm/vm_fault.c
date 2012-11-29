@@ -1163,8 +1163,6 @@ vm_fault_1gb(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
                 ("vm_fault: page %p partially invalid", fs.m));
         }
 
-        VM_OBJECT_UNLOCK(fs.object);
-
 
 	/*
 	 * Put this page into the physical map.  We had to do the unlock above
@@ -1175,16 +1173,11 @@ vm_fault_1gb(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
 
         fs.m = &page_array[fs.first_pindex];
 
-        // vm_page_lock_queues();
         pmap_enter_object_1gb(fs.map->pmap, vaddr, fs.m, prot);
-        // vm_page_unlock_queues();
 
         if (((fault_flags & VM_FAULT_CHANGE_WIRING) == 0) && (wired == 0)) {
                 vm_fault_prefault(fs.map->pmap, vaddr, fs.entry);
         }
-
-	VM_OBJECT_LOCK(fs.object);
-	vm_page_lock(fs.m);
 
 
         //
@@ -1195,8 +1188,7 @@ vm_fault_1gb(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
             fs.pindex = fs.first_pindex + i;
             fs.m = &page_array[fs.pindex];
 
-            // vm_page_lock_queues();
-            // vm_page_flag_set(fs.m, PG_REFERENCED);
+            vm_page_lock(fs.m);
 
             /*
              * If the page is not wired down, then put it where the pageout daemon
@@ -1211,7 +1203,6 @@ vm_fault_1gb(vm_map_t map, vm_offset_t vaddr, vm_prot_t fault_type,
             } else {
                     vm_page_activate(fs.m);
             }
-            // vm_page_unlock_queues();
             vm_page_unlock(fs.m);
             vm_page_wakeup(fs.m);
         }
