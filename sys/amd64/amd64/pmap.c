@@ -1339,7 +1339,7 @@ retry:
 					KASSERT(pte_p != NULL, ("pmap_extract_and_hold: pmap_pde_to_pte returned a NULL PTE from a valid PDE!"));
 					pte = *pte_p;
 					if ((pte & PG_V) && ((pte & PG_RW) || (prot & VM_PROT_WRITE) == 0)) {
-						if (vm_page_pa_tryrelock(pmap, (pde & PG_PS_FRAME) | (va & PDRMASK), &pa))
+						if (vm_page_pa_tryrelock(pmap, (pte & PG_FRAME), &pa))
 							goto retry;
 						m = PHYS_TO_VM_PAGE(pte & PG_FRAME);
 						vm_page_hold(m);
