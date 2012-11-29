@@ -470,9 +470,14 @@ static int sysctl_1gig_buddy_alloc(SYSCTL_HANDLER_ARGS) {
     int num_alloc_slots = sizeof(kmem_1gig_allocations) / sizeof(kmem_1gig_allocations[0]);
     int i;
 
+    alloc = -1;
     error = sysctl_handle_long(oidp, &alloc, 0, req);
     if (error) {
         return error;
+    }
+    if (alloc == -1) {
+        printf("sysctl_1gig_buddy_alloc got %ld, no val supplied!\n", alloc);
+        return 0;
     }
 
     printf("sysctl_1gig_buddy_alloc got %ld\n", alloc);
