@@ -588,7 +588,7 @@ retry:
                 pmap_zero_page(m_tmp);
             }
             m_tmp->valid = VM_PAGE_BITS_ALL;
-            KASSERT((m_tmp->flags & PG_UNMANAGED) != 0, ("kmem_malloc_1gig_page: page %p is managed", m_tmp));
+            KASSERT((m_tmp->oflags & VPO_UNMANAGED) != 0, ("kmem_malloc_1gig_page: page %p is managed", m_tmp));
         }
 
 	VM_OBJECT_UNLOCK(kmem_object);
