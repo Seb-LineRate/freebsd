@@ -4209,6 +4209,7 @@ pmap_enter_object_1gb(
 
 
 	VM_OBJECT_LOCK_ASSERT(m_start->object, MA_OWNED);
+	rw_wlock(&pvh_global_lock);
 	PMAP_LOCK(pmap);
 
 
@@ -4312,6 +4313,7 @@ pmap_enter_object_1gb(
 	}
 
 
+	rw_wunlock(&pvh_global_lock);
 	PMAP_UNLOCK(pmap);
 }
 
