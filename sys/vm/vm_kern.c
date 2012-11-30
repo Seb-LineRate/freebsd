@@ -581,8 +581,10 @@ retry:
         }
 #endif
 
-        for (i = 1; i < num_4k_pages; i++) {
+        for (i = 0; i < num_4k_pages; i++) {
             vm_page_t m_tmp = &m[i];
+
+            m_tmp->object = kmem_object; // FIXME: is this right?
 
             if (flags & M_ZERO && (m_tmp->flags & PG_ZERO) == 0) {
                 pmap_zero_page(m_tmp);
@@ -590,8 +592,6 @@ retry:
             m_tmp->valid = VM_PAGE_BITS_ALL;
             KASSERT((m_tmp->oflags & VPO_UNMANAGED) != 0, ("kmem_malloc_1gig_page: page %p is managed", m_tmp));
         }
-
-	VM_OBJECT_UNLOCK(kmem_object);
 
 	/*
 	 * Mark map entry as non-pageable. Assert: vm_map_insert() will never
@@ -605,18 +605,13 @@ retry:
 		panic("kmem_malloc_1gig_page: entry not found or misaligned");
 	entry->wired_count = 1;
 
-	/*
-	 * At this point, the kmem_object must be unlocked because
-	 * vm_map_simplify_entry() calls vm_object_deallocate(), which
-	 * locks the kmem_object.
-	 */
 	vm_map_simplify_entry(map, entry);
 
 	// enter pages into the pmap
-	VM_OBJECT_LOCK(kmem_object);
         vm_page_lock_queues();
         pmap_enter_object_1gb(kernel_pmap, addr, m, VM_PROT_ALL);
         vm_page_unlock_queues();
+
 	VM_OBJECT_UNLOCK(kmem_object);
 	vm_map_unlock(map);
 
