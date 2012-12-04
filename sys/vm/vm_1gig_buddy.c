@@ -304,11 +304,31 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
 }
 
 
+static inline uint64_t round_up_to_power_of_2(uint64_t x) {
+    // 4096 is the minimum power of 2 we'll return
+    if (x < 4096) {
+        return 4096;
+    }
+
+    x--;
+    x |= x >> 1;  // handle  2 bit numbers
+    x |= x >> 2;  // handle  4 bit numbers
+    x |= x >> 4;  // handle  8 bit numbers
+    x |= x >> 8;  // handle 16 bit numbers
+    x |= x >> 16; // handle 32 bit numbers
+    x |= x >> 32; // handle 64 bit numbers
+    x++;
+
+    return x;
+}
+
+
 // we might have to add interior nodes to reach down to the leaf node that will represent this va/size pair
 // we might have to coalesce this chunk with its buddy, and recursively up the tree
 static void
 kmem_free_1gig_to_page(struct kmem_1gig_page *p, vm_offset_t addr, vm_size_t size)
 {
+    vm_size_t node_size;  // size of the node we're freeing this chunk to
     struct kmem_1gig_free_node *n;
 
     printf("kmem_free_1gig_to_page: freeing %ld bytes at va 0x%016lx\n", size, addr);
@@ -328,30 +348,48 @@ kmem_free_1gig_to_page(struct kmem_1gig_page *p, vm_offset_t addr, vm_size_t siz
 
     n = p->root;
 
-    while (size != n->size) {
-        if (addr < n->va + (n->size / 2)) {
+
+    //
+    // We're freeing a chunk with a given virtual address and size.
+    //
+    // Round the size up to the next higher power of two, because that's
+    // the size increment that the buddy allocator uses.
+    //
+
+    node_size = round_up_to_power_of_2(size);
+    KASSERT(node_size >= 4096, ("kmem_free_1gig_to_page: round_up_to_power_of_2(%lu) returned %lu, expected 4096\n", size, node_size));
+
+    while (node_size < n->size) {
+
+        // The current node is too big for what we're freeing, go down
+        // one level (left or right, depending on virtual address).
+        if (addr < (n->va + (n->size / 2))) {
+            // the chunk we're freeing is in the left tree of the current node
             if (n->left_child == NULL) {
+                // allocate the left child, if needed
                 n->left_child = (void*)kmem_malloc(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
                 if (n->left_child == NULL) {
                     printf("kmem_free_1gig_to_page: out of memory!\n");
                     return;
                 }
-                n->left_child->va = p->va;
                 n->left_child->size = n->size / 2;
+                n->left_child->va = n->va;
                 n->left_child->parent = n;
                 n->left_child->left_child = NULL;
                 n->left_child->right_child = NULL;
             }
             n = n->left_child;
+
         } else {
+            // the chunk we're freeing is in the right tree of the current node
             if (n->right_child == NULL) {
                 n->right_child = (void*)kmem_malloc(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
                 if (n->right_child == NULL) {
                     printf("kmem_free_1gig_to_page: out of memory!\n");
                     return;
                 }
-                n->right_child->va = p->va;
                 n->right_child->size = n->size / 2;
+                n->right_child->va = n->va + n->right_child->size;
                 n->right_child->parent = n;
                 n->right_child->left_child = NULL;
                 n->right_child->right_child = NULL;
@@ -360,9 +398,13 @@ kmem_free_1gig_to_page(struct kmem_1gig_page *p, vm_offset_t addr, vm_size_t siz
         }
     }
 
+    // If we get here, then the chunk we're freeing belongs on this
+    // level, and it better belong exactly to the current node or we're
+    // lost in the tree!
+
     // we're done!
     KASSERT(n->va == addr, ("kmem_free_1gig_to_page: found the node, but the va is wrong\n"));
-    KASSERT(n->size == size, ("kmem_free_1gig_to_page: found the node, but the size is wrong\n"));
+    KASSERT(n->size == node_size, ("kmem_free_1gig_to_page: found the node, but the size is wrong\n"));
     KASSERT(n->left_child == NULL, ("kmem_free_1gig_to_page: found the node, but the left child is not NULL\n"));
     KASSERT(n->right_child == NULL, ("kmem_free_1gig_to_page: found the node, but the right child is not NULL\n"));
 
