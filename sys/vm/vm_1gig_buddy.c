@@ -424,6 +424,7 @@ kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
         if ((addr & ~((1024*1024*1024)-1)) == p->va) {
             // free this memory back to this page
             kmem_free_1gig_to_page(p, addr, size);
+            return;
         }
     }
 
