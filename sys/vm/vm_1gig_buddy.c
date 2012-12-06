@@ -28,14 +28,16 @@
 // This struct is a node in a binary tree of power-of-2-sized memory
 // regions backed by a 1 gig page.
 //
-// If a node has no children, it means the whole node is free.
+// If a node has no children (both left_child and right_child are NULL), it
+// means the whole node is free.
 //
-// If a node has any children, it means that the memory governed by the
-// node is partially in use, ie not wholly free.
+// If a node has one or two children, it means that the memory tracked by
+// the node is partially free and partially in use.  In this case, a
+// missing child (a child pointer that is NULL), indicates that the missing
+// child is fully allocated.  A child pointer that is not NULL points to a
+// node that is not fully allocated, ie it is at least partially free.
 //
-// If a node is missing (ie if the parent node has a NULL pointer where
-// this node would be), then the memory governed by the missing node is allocated.
-//
+
 struct kmem_1gig_free_node {
     vm_offset_t va;
     size_t size;
