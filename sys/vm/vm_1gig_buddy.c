@@ -160,30 +160,17 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
 
     KASSERT(mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
 
-    printf("kmem_1gig_find_free: looking for %lu free bytes on 1 gig page at %p\n", size, p);
-
     // find the best leaf node to use for this allocation
     n = kmem_1gig_find_free_node(p->root, size);
     if (n == NULL) {
         // there is no free chunk in this 1 gig page suitable for this allocation
-        printf("kmem_1gig_find_free: no sufficiently large free chunks\n");
         return 0;
     }
-
-    printf("kmem_1gig_find_free: found a sufficiently large free chunk!\n");
-    printf("    n->va = 0x%016lx\n", n->va);
-    printf("    n->size = %lu\n", n->size);
-    printf("    n->parent = %p\n", n->parent);
-    printf("    n->left_child = %p\n", n->left_child);
-    printf("    n->right_child = %p\n", n->right_child);
 
     // n is the node we should use to satisfy the allocation
 
     // split the node, if possible
     while ((n->size > PAGE_SIZE) && (n->size/2 >= size)) {
-        printf("kmem_1gig_find_free: splitting node...\n");
-        printf("    original node size is %ld\n", n->size);
-
         n->left_child = (void*)kmem_malloc_real(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
         if (n->left_child == NULL) {
             printf("kmem_1gig_find_free: out of memory while splitting node\n");
@@ -194,7 +181,6 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
         n->right_child = (void*)kmem_malloc_real(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
         if (n->right_child == NULL) {
             kmem_free(kmem_map, (vm_offset_t)n->left_child, sizeof(struct kmem_1gig_free_node));
-            printf("kmem_1gig_find_free: out of memory while splitting node\n");
             // oh well, let's just use this node I guess, even though it's too big
             break;
         }
@@ -213,7 +199,6 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
 
         // try to split one of the newly created child nodes
         n = n->left_child;
-        printf("    new node size is %ld\n", n->size);
     }
 
     // remove the node from the tree if possible
@@ -235,8 +220,6 @@ kmem_1gig_add_page(void)
 
     KASSERT(mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
 
-    printf("kmem_1gig_add_page: trying to add another gig\n");
-
     va = kmem_malloc_1gig_page(kmem_map, M_WAITOK);
     if (va == 0) {
         printf("kmem_1gig_add_page: failed to allocate another gig\n");
@@ -245,14 +228,12 @@ kmem_1gig_add_page(void)
 
     n = (void*)kmem_malloc_real(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
     if (n == NULL) {
-        printf("kmem_1gig_add_page: failed to allocate root free node\n");
         kmem_free(kmem_map, va, one_gig);
         return NULL;
     }
 
     p = (void*)kmem_malloc_real(kmem_map, sizeof(struct kmem_1gig_page), M_WAITOK);
     if (p == NULL) {
-        printf("kmem_1gig_add_page: failed to allocate metadata\n");
         kmem_free(kmem_map, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
         kmem_free(kmem_map, va, one_gig);
         return NULL;
@@ -279,8 +260,6 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
     vm_offset_t va;
     struct kmem_1gig_page *p;
 
-    printf("kmem_malloc_1gig: got a request for %lu bytes\n", size);
-
     if (size > 1024*1024*1024) {
         // punt
         printf("kmem_malloc_1gig: request is too big, punting to the real allocator\n");
@@ -294,21 +273,18 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
         va = kmem_1gig_find_free(p, size);
         if (va != 0) {
             // found one, return it quick!
-            printf("kmem_malloc_1gig: request is satisfied, returning VA 0x%016lx\n", va);
             mtx_unlock(&kmem_1gig_mutex);
             return va;
         }
     }
 
     // didn't find a page with free space for this allocation
-    printf("kmem_malloc_1gig: request could not be satisified from the current list of 1 gig pages, allocating a new one from the real allocator\n");
     p = kmem_1gig_add_page();
     if (p != NULL) {
         // we got some more memory!
         va = kmem_1gig_find_free(p, size);
         if (va != 0) {
             // found one, return it quick!
-            printf("kmem_malloc_1gig: request is satisfied from the new page, returning VA 0x%016lx\n", va);
             mtx_unlock(&kmem_1gig_mutex);
             return va;
         }
@@ -410,7 +386,7 @@ kmem_free_1gig_to_page(struct kmem_1gig_page *p, vm_offset_t addr, vm_size_t siz
     if (p->root == NULL) {
         p->root = (void*)kmem_malloc(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
         if (p->root == NULL) {
-            printf("kmem_free_1gig: out of memory!\n");
+            printf("kmem_free_1gig_to_page: out of memory!\n");
             return;
         }
         p->root->va = p->va;
@@ -493,8 +469,6 @@ kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
 {
     struct kmem_1gig_page *p;
 
-    printf("kmem_free_1gig: map=%p, va=0x%016lx, size=%ld\n", map, addr, size);
-
     mtx_lock(&kmem_1gig_mutex);
 
     // find the 1 gig page that has this va
@@ -508,7 +482,8 @@ kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
     }
 
     mtx_unlock(&kmem_1gig_mutex);
-    printf("kmem_free_1gig: couldnt find a page for va=%lu, must be from the regular allocator\n", addr);
+
+    // couldnt find a page for that VA, must be from the regular allocator
     kmem_free_real(map, addr, size);
 }
 
@@ -601,7 +576,6 @@ static int sysctl_1gig_buddy_alloc(SYSCTL_HANDLER_ARGS) {
         return error;
     }
     if (alloc == -99999) {
-        printf("sysctl_1gig_buddy_alloc got %ld, no val supplied!\n", alloc);
         return 0;
     }
 
