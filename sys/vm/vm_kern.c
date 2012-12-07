@@ -95,6 +95,7 @@ vm_map_t buffer_map=0;
 const void *zero_region;
 CTASSERT((ZERO_REGION_SIZE & PAGE_MASK) == 0);
 
+
 /*
  *	kmem_alloc_nofault:
  *
@@ -210,7 +211,7 @@ kmem_free(map, addr, size)
 	vm_offset_t addr;
 	vm_size_t size;
 {
-	kmem_free_real(map, addr, size);
+        kmem_free_1gig(map, addr, size);
 }
 
 void
@@ -284,7 +285,7 @@ kmem_malloc(map, size, flags)
 	vm_size_t size;
 	int flags;
 {
-    return kmem_malloc_real(map, size, flags);
+    return kmem_malloc_1gig(map, size, flags);
 }
 
 vm_offset_t
