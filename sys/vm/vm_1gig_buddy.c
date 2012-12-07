@@ -278,6 +278,9 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
             }
+            if (flags & M_ZERO) {
+                bzero((void*)va, size);
+            }
             return va;
         }
     }
@@ -291,6 +294,9 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
             // found one, return it quick!
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
+            }
+            if (flags & M_ZERO) {
+                bzero((void*)va, size);
             }
             return va;
         }
