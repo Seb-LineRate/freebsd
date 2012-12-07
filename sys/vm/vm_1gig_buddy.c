@@ -63,7 +63,6 @@ struct kmem_1gig_page {
 LIST_HEAD(, kmem_1gig_page) kmem_1gig_pages = LIST_HEAD_INITIALIZER();
 
 static struct mtx kmem_1gig_mutex;
-MTX_SYSINIT(kmem_1gig_mutex, &kmem_1gig_mutex, "kmem 1gig mutex", MTX_DEF);
 
 
 //
@@ -180,7 +179,7 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
 
         n->right_child = (void*)kmem_malloc_real(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
         if (n->right_child == NULL) {
-            kmem_free(kmem_map, (vm_offset_t)n->left_child, sizeof(struct kmem_1gig_free_node));
+            kmem_free_real(kmem_map, (vm_offset_t)n->left_child, sizeof(struct kmem_1gig_free_node));
             // oh well, let's just use this node I guess, even though it's too big
             break;
         }
@@ -205,7 +204,7 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
     kmem_1gig_remove_node(p, n);
 
     va = n->va;
-    kmem_free(kmem_map, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
+    kmem_free_real(kmem_map, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
     return va;
 }
 
@@ -228,14 +227,14 @@ kmem_1gig_add_page(void)
 
     n = (void*)kmem_malloc_real(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
     if (n == NULL) {
-        kmem_free(kmem_map, va, one_gig);
+        kmem_free_real(kmem_map, va, one_gig);
         return NULL;
     }
 
     p = (void*)kmem_malloc_real(kmem_map, sizeof(struct kmem_1gig_page), M_WAITOK);
     if (p == NULL) {
-        kmem_free(kmem_map, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
-        kmem_free(kmem_map, va, one_gig);
+        kmem_free_real(kmem_map, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
+        kmem_free_real(kmem_map, va, one_gig);
         return NULL;
     }
 
@@ -259,6 +258,12 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
 {
     vm_offset_t va;
     struct kmem_1gig_page *p;
+
+    // initialize the mutex now if it is not initialized yet
+    if (!mtx_initialized(&kmem_1gig_mutex)) {
+        printf("kmem_malloc_1gig: initializing mutex\n");
+        mtx_init(&kmem_1gig_mutex, "kmem 1gig buddy mutex", MTX_DEF, 0);
+    }
 
     if (size > 1024*1024*1024) {
         // punt
@@ -384,7 +389,7 @@ kmem_free_1gig_to_page(struct kmem_1gig_page *p, vm_offset_t addr, vm_size_t siz
     KASSERT(mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
 
     if (p->root == NULL) {
-        p->root = (void*)kmem_malloc(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
+        p->root = (void*)kmem_malloc_real(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
         if (p->root == NULL) {
             printf("kmem_free_1gig_to_page: out of memory!\n");
             return;
@@ -416,7 +421,7 @@ kmem_free_1gig_to_page(struct kmem_1gig_page *p, vm_offset_t addr, vm_size_t siz
             // the chunk we're freeing is in the left tree of the current node
             if (n->left_child == NULL) {
                 // allocate the left child, if needed
-                n->left_child = (void*)kmem_malloc(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
+                n->left_child = (void*)kmem_malloc_real(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
                 if (n->left_child == NULL) {
                     printf("kmem_free_1gig_to_page: out of memory!\n");
                     return;
@@ -432,7 +437,7 @@ kmem_free_1gig_to_page(struct kmem_1gig_page *p, vm_offset_t addr, vm_size_t siz
         } else {
             // the chunk we're freeing is in the right tree of the current node
             if (n->right_child == NULL) {
-                n->right_child = (void*)kmem_malloc(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
+                n->right_child = (void*)kmem_malloc_real(kmem_map, sizeof(struct kmem_1gig_free_node), M_WAITOK);
                 if (n->right_child == NULL) {
                     printf("kmem_free_1gig_to_page: out of memory!\n");
                     return;
@@ -468,6 +473,11 @@ void
 kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
 {
     struct kmem_1gig_page *p;
+
+    if (!mtx_initialized(&kmem_1gig_mutex)) {
+        printf("kmem_free_1gig: initializing mutex\n");
+        mtx_init(&kmem_1gig_mutex, "kmem 1gig buddy mutex", MTX_DEF, 0);
+    }
 
     mtx_lock(&kmem_1gig_mutex);
 
@@ -629,16 +639,20 @@ static int sysctl_1gig_buddy_alloc_state(SYSCTL_HANDLER_ARGS) {
         );
     }
 
-    sbuf_printf(sb, "1 gig buddy allocator pages:\n");
-    mtx_lock(&kmem_1gig_mutex);
-    LIST_FOREACH(p, &kmem_1gig_pages, list) {
-        vm_size_t size;
-        sbuf_printf(sb, "    page at va 0x%016lx:\n", p->va);
-        for (size = 1024*1024*1024; size >= PAGE_SIZE; size /= 2) {
-            sbuf_printf(sb, "        %10ld-byte free chunks: %d\n", size, kmem_1gig_count_free_chunks(p->root, size));
+    if (mtx_initialized(&kmem_1gig_mutex)) {
+        sbuf_printf(sb, "1 gig buddy allocator pages:\n");
+        mtx_lock(&kmem_1gig_mutex);
+        LIST_FOREACH(p, &kmem_1gig_pages, list) {
+            vm_size_t size;
+            sbuf_printf(sb, "    page at va 0x%016lx:\n", p->va);
+            for (size = 1024*1024*1024; size >= PAGE_SIZE; size /= 2) {
+                sbuf_printf(sb, "        %10ld-byte free chunks: %d\n", size, kmem_1gig_count_free_chunks(p->root, size));
+            }
         }
+        mtx_unlock(&kmem_1gig_mutex);
+    } else {
+        sbuf_printf(sb, "1 gig buddy allocator not initialized yet\n");
     }
-    mtx_unlock(&kmem_1gig_mutex);
 
     sbuf_finish(sb);
     error = SYSCTL_OUT(req, sbuf_data(sb), sbuf_len(sb) + 1);
