@@ -160,6 +160,8 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
 
     KASSERT(cold || mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
 
+    if (size > p->bytes_free) return 0;
+
     // find the best leaf node to use for this allocation
     n = kmem_1gig_find_free_node(p->root, size);
     if (n == NULL) {
