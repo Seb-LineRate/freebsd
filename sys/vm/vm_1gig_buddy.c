@@ -56,6 +56,9 @@ struct kmem_1gig_page {
     LIST_ENTRY(kmem_1gig_page) list;   // list of 1 gig pages used by the allocator
     struct kmem_1gig_free_node *root;         // root of the free-node tree
     vm_offset_t va;
+    uint64_t bytes_free;
+    uint64_t bytes_allocated;    // how much did our users ask for?
+    uint64_t bytes_handed_out;   // how much did we actually give our users?  (it'll probably be more than bytes_allocated because we round up to a power of 2)
 };
 
 
@@ -64,6 +67,25 @@ LIST_HEAD(, kmem_1gig_page) kmem_1gig_pages = LIST_HEAD_INITIALIZER();
 
 static struct mtx kmem_1gig_mutex;
 MTX_SYSINIT(kmem_1gig_mutex, &kmem_1gig_mutex, "kmem 1gig mutex", MTX_DEF);
+
+
+static inline uint64_t round_up_to_power_of_2(uint64_t x) {
+    // 4096 is the minimum power of 2 we'll return
+    if (x < 4096) {
+        return 4096;
+    }
+
+    x--;
+    x |= x >> 1;  // handle  2 bit numbers
+    x |= x >> 2;  // handle  4 bit numbers
+    x |= x >> 4;  // handle  8 bit numbers
+    x |= x >> 8;  // handle 16 bit numbers
+    x |= x >> 16; // handle 32 bit numbers
+    x |= x >> 32; // handle 64 bit numbers
+    x++;
+
+    return x;
+}
 
 
 //
@@ -249,6 +271,9 @@ kmem_1gig_add_page(void)
 
     p->root = n;
     p->va = va;
+    p->bytes_free = 1024UL * 1024UL * 1024UL;
+    p->bytes_allocated = 0;
+    p->bytes_handed_out = 0;
 
     LIST_INSERT_HEAD(&kmem_1gig_pages, p, list);
 
@@ -276,6 +301,23 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
     LIST_FOREACH(p, &kmem_1gig_pages, list) {
         va = kmem_1gig_find_free(p, size);
         if (va != 0) {
+            uint64_t node_size;
+
+            node_size = round_up_to_power_of_2(size);
+            p->bytes_free -= node_size;
+            p->bytes_allocated += size;
+            p->bytes_handed_out += node_size;
+
+            printf(
+                "kmem_malloc_1gig: allocated %ld bytes (%ld bytes handed out) from 1gig page at 0x%016lx, %lu bytes left (%lu kB, %lu MB)\n",
+                size,
+                node_size,
+                p->va,
+                p->bytes_free,
+                (p->bytes_free / 1024),
+                (p->bytes_free / (1024*1024))
+            );
+
             // found one, return it quick!
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
@@ -290,9 +332,26 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
     // didn't find a page with free space for this allocation
     p = kmem_1gig_add_page();
     if (p != NULL) {
-        // we got some more memory!
+        // we got a new 1gig page!
         va = kmem_1gig_find_free(p, size);
         if (va != 0) {
+            uint64_t node_size;
+
+            node_size = round_up_to_power_of_2(size);
+            p->bytes_free -= node_size;
+            p->bytes_allocated += size;
+            p->bytes_handed_out += node_size;
+
+            printf(
+                "kmem_malloc_1gig: allocated %ld bytes (%ld bytes handed out) from 1gig page at 0x%016lx, %lu bytes left (%lu kB, %lu MB)\n",
+                size,
+                node_size,
+                p->va,
+                p->bytes_free,
+                (p->bytes_free / 1024),
+                (p->bytes_free / (1024*1024))
+            );
+
             // found one, return it quick!
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
@@ -311,25 +370,6 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
     }
     printf("kmem_malloc_1gig: everything failed, punting to the real allocator\n");
     return kmem_malloc_real(map, size, flags);
-}
-
-
-static inline uint64_t round_up_to_power_of_2(uint64_t x) {
-    // 4096 is the minimum power of 2 we'll return
-    if (x < 4096) {
-        return 4096;
-    }
-
-    x--;
-    x |= x >> 1;  // handle  2 bit numbers
-    x |= x >> 2;  // handle  4 bit numbers
-    x |= x >> 4;  // handle  8 bit numbers
-    x |= x >> 8;  // handle 16 bit numbers
-    x |= x >> 16; // handle 32 bit numbers
-    x |= x >> 32; // handle 64 bit numbers
-    x++;
-
-    return x;
 }
 
 
@@ -491,9 +531,28 @@ kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
 
     // find the 1 gig page that has this va
     LIST_FOREACH(p, &kmem_1gig_pages, list) {
-        if ((addr & ~((1024*1024*1024)-1)) == p->va) {
+        if ((addr & ~((1024UL*1024*1024)-1)) == p->va) {
+            uint64_t node_size;
+
             // free this memory back to this page
             kmem_free_1gig_to_page(p, addr, size);
+
+            node_size = round_up_to_power_of_2(size);
+            p->bytes_free += node_size;
+            p->bytes_allocated -= size;
+            p->bytes_handed_out -= node_size;
+
+            printf(
+                "kmem_free_1gig: freed %ld bytes (%ld bytes returned) to 1gig page at 0x%016lx, now has %lu bytes free (%lu kB, %lu MB)\n",
+                size,
+                node_size,
+                p->va,
+                p->bytes_free,
+                (p->bytes_free / 1024),
+                (p->bytes_free / (1024*1024))
+            );
+
+            // found one, return it quick!
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
             }
@@ -531,6 +590,7 @@ kmem_1gig_count_free_chunks(struct kmem_1gig_free_node *n, vm_size_t size)
         return 1;
     }
 
+    // this node is too big, ask both children
     return kmem_1gig_count_free_chunks(n->left_child, size) + kmem_1gig_count_free_chunks(n->right_child, size);
 }
 
@@ -572,7 +632,7 @@ SYSCTL_PROC(
 static struct {
     vm_offset_t va;
     vm_size_t size;
-} kmem_1gig_allocations[10] = {
+} kmem_1gig_allocations[1000] = {
     { -1, 0 },
     { 0, 0 },
     { 0, 0 },
@@ -657,7 +717,33 @@ static int sysctl_1gig_buddy_alloc_state(SYSCTL_HANDLER_ARGS) {
     }
     LIST_FOREACH(p, &kmem_1gig_pages, list) {
         vm_size_t size;
+
         sbuf_printf(sb, "    page at va 0x%016lx:\n", p->va);
+
+        sbuf_printf(
+            sb,
+            "        space free: %lu (%lu kB, %lu MB)\n",
+            p->bytes_free,
+            (p->bytes_free/1024),
+            (p->bytes_free/(1024*1024))
+        );
+
+        sbuf_printf(
+            sb,
+            "        space allocated: %lu (%lu kB, %lu MB)\n",
+            p->bytes_allocated,
+            (p->bytes_allocated/1024),
+            (p->bytes_allocated/(1024*1024))
+        );
+
+        sbuf_printf(
+            sb,
+            "        space handed out: %lu (%lu kB, %lu MB)\n",
+            p->bytes_handed_out,
+            (p->bytes_handed_out/1024),
+            (p->bytes_handed_out/(1024*1024))
+        );
+
         for (size = 1024*1024*1024; size >= PAGE_SIZE; size /= 2) {
             sbuf_printf(sb, "        %10ld-byte free chunks: %d\n", size, kmem_1gig_count_free_chunks(p->root, size));
         }
