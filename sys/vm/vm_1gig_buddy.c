@@ -53,7 +53,7 @@ struct kmem_1gig_free_node {
 // kernel (including uma slabs).
 //
 struct kmem_1gig_page {
-    LIST_ENTRY(kmem_1gig_page) list;   // list of 1 gig pages used by the allocator
+    TAILQ_ENTRY(kmem_1gig_page) list;   // list of 1 gig pages used by the allocator
     struct kmem_1gig_free_node *root;         // root of the free-node tree
     vm_offset_t va;
     uint64_t bytes_free;
@@ -63,7 +63,7 @@ struct kmem_1gig_page {
 
 
 
-LIST_HEAD(, kmem_1gig_page) kmem_1gig_pages = LIST_HEAD_INITIALIZER();
+TAILQ_HEAD(kmem_1gig_page_list, kmem_1gig_page) kmem_1gig_pages = TAILQ_HEAD_INITIALIZER(kmem_1gig_pages);
 
 static struct mtx kmem_1gig_mutex;
 MTX_SYSINIT(kmem_1gig_mutex, &kmem_1gig_mutex, "kmem 1gig mutex", MTX_DEF);
@@ -85,6 +85,105 @@ static inline uint64_t round_up_to_power_of_2(uint64_t x) {
     x++;
 
     return x;
+}
+
+
+static void kmem_1gig_sort_page_list(struct kmem_1gig_page *p) {
+    do {
+        struct kmem_1gig_page *prev, *next;
+
+        prev = TAILQ_PREV(p, kmem_1gig_page_list, list);
+        next = TAILQ_NEXT(p, list);
+
+#if 0
+        printf(
+            "1gig alloc: should sort pages, prev->bytes_free=%ld, p->bytes_free=%ld, next->bytes_free=%ld\n",
+            (prev != NULL ? prev->bytes_free : -1),
+            p->bytes_free,
+            (next != NULL ? next->bytes_free : -1)
+        );
+#endif
+
+
+        if (prev == NULL) {
+            // p is the head of the list
+            if (next == NULL) {
+                return;
+            }
+            if (p->bytes_free > next->bytes_free) {
+                // swap p and next and sort again
+                struct kmem_1gig_page *next_next;
+                next_next = TAILQ_NEXT(next, list);
+                TAILQ_NEXT(next, list) = p;
+                TAILQ_PREV(p, kmem_1gig_page_list, list) = next;
+                TAILQ_PREV(p, kmem_1gig_page_list, list) = next_next;
+                continue;
+            } else {
+                return;
+            }
+
+        } else if (next == NULL) {
+            // p is the tail of the list
+            // prev is not NULL
+            if (p->bytes_free < prev->bytes_free) {
+                // swap p and prev and sort again
+                struct kmem_1gig_page *prev_prev;
+                prev_prev = TAILQ_PREV(prev, kmem_1gig_page_list, list);
+                TAILQ_PREV(prev, kmem_1gig_page_list, list) = p;
+                TAILQ_NEXT(p, list) = prev;
+                TAILQ_PREV(p, kmem_1gig_page_list, list) = prev_prev;
+                continue;
+            } else {
+                return;
+            }
+
+        } else {
+            // p is somewhere in the middle of the list
+            if (p->bytes_free < prev->bytes_free) {
+                // swap p and prev and sort again
+                struct kmem_1gig_page *prev_prev;
+
+                prev_prev = TAILQ_PREV(prev, kmem_1gig_page_list, list);
+
+                if (prev_prev != NULL) {
+                    TAILQ_NEXT(prev_prev, list) = p;
+                }
+
+                TAILQ_PREV(prev, kmem_1gig_page_list, list) = p;
+                TAILQ_NEXT(prev, list) = next;
+
+                TAILQ_PREV(p, kmem_1gig_page_list, list) = prev_prev;
+                TAILQ_NEXT(p, list) = prev;
+
+                TAILQ_PREV(next, kmem_1gig_page_list, list) = prev;
+
+                continue;
+
+            } else if (p->bytes_free > next->bytes_free) {
+                // swap p and next and sort again
+                struct kmem_1gig_page *next_next;
+
+                next_next = TAILQ_NEXT(next, list);
+
+                if (next_next != NULL) {
+                    TAILQ_PREV(next_next, kmem_1gig_page_list, list) = p;
+                }
+
+                TAILQ_NEXT(next, list) = p;
+                TAILQ_PREV(next, kmem_1gig_page_list, list) = prev;
+
+                TAILQ_NEXT(p, list) = next_next;
+                TAILQ_PREV(p, kmem_1gig_page_list, list) = next;
+
+                TAILQ_NEXT(prev, list) = next;
+
+                continue;
+            }
+
+            // p is where it belongs
+            return;
+        }
+    } while (1);
 }
 
 
@@ -275,7 +374,7 @@ kmem_1gig_add_page(void)
     p->bytes_allocated = 0;
     p->bytes_handed_out = 0;
 
-    LIST_INSERT_HEAD(&kmem_1gig_pages, p, list);
+    TAILQ_INSERT_TAIL(&kmem_1gig_pages, p, list);
 
     return p;
 }
@@ -298,7 +397,7 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
     }
 
     // do we have a 1 gig page with a free chunk big enough for this allocation request?
-    LIST_FOREACH(p, &kmem_1gig_pages, list) {
+    TAILQ_FOREACH(p, &kmem_1gig_pages, list) {
         va = kmem_1gig_find_free(p, size);
         if (va != 0) {
             uint64_t node_size;
@@ -319,6 +418,7 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
             );
 
             // found one, return it quick!
+            kmem_1gig_sort_page_list(p);
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
             }
@@ -353,6 +453,7 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
             );
 
             // found one, return it quick!
+            kmem_1gig_sort_page_list(p);
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
             }
@@ -530,12 +631,13 @@ kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
     }
 
     // find the 1 gig page that has this va
-    LIST_FOREACH(p, &kmem_1gig_pages, list) {
+    TAILQ_FOREACH(p, &kmem_1gig_pages, list) {
         if ((addr & ~((1024UL*1024*1024)-1)) == p->va) {
             uint64_t node_size;
 
             // free this memory back to this page
             kmem_free_1gig_to_page(p, addr, size);
+            kmem_1gig_sort_page_list(p);
 
             node_size = round_up_to_power_of_2(size);
             p->bytes_free += node_size;
@@ -715,7 +817,7 @@ static int sysctl_1gig_buddy_alloc_state(SYSCTL_HANDLER_ARGS) {
     if (!cold) {
         mtx_lock(&kmem_1gig_mutex);
     }
-    LIST_FOREACH(p, &kmem_1gig_pages, list) {
+    TAILQ_FOREACH(p, &kmem_1gig_pages, list) {
         vm_size_t size;
 
         sbuf_printf(sb, "    page at va 0x%016lx:\n", p->va);
