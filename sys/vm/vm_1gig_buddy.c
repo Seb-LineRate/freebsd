@@ -88,6 +88,54 @@ static inline uint64_t round_up_to_power_of_2(uint64_t x) {
 }
 
 
+static inline void kmem_1gig_alloc_bookkeeping(struct kmem_1gig_page *p, vm_size_t size) {
+    uint64_t node_size;
+
+    KASSERT(p != NULL, ("kmem_1gig_alloc_bookkeeping: got NULL page!\n"));
+
+    node_size = round_up_to_power_of_2(size);
+    p->bytes_free -= node_size;
+    p->bytes_allocated += size;
+    p->bytes_handed_out += node_size;
+
+#if 0
+    printf(
+        "1gig buddy allocator: allocated %ld bytes (%ld bytes handed out) from 1gig page at 0x%016lx, %lu bytes left (%lu kB, %lu MB)\n",
+        size,
+        node_size,
+        p->va,
+        p->bytes_free,
+        (p->bytes_free / 1024),
+        (p->bytes_free / (1024*1024))
+    );
+#endif
+}
+
+
+static inline void kmem_1gig_free_bookkeeping(struct kmem_1gig_page *p, vm_size_t size) {
+    uint64_t node_size;
+
+    KASSERT(p != NULL, ("kmem_1gig_free_bookkeeping: got NULL page!\n"));
+
+    node_size = round_up_to_power_of_2(size);
+    p->bytes_free += node_size;
+    p->bytes_allocated -= size;
+    p->bytes_handed_out -= node_size;
+
+#if 0
+    printf(
+        "1gig buddy allocator: freed %ld bytes (%ld bytes returned) to 1gig page at 0x%016lx, now has %lu bytes free (%lu kB, %lu MB)\n",
+        size,
+        node_size,
+        p->va,
+        p->bytes_free,
+        (p->bytes_free / 1024),
+        (p->bytes_free / (1024*1024))
+    );
+#endif
+}
+
+
 static void kmem_1gig_sort_page_list(struct kmem_1gig_page *p) {
     do {
         struct kmem_1gig_page *prev, *next;
@@ -400,24 +448,8 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
     TAILQ_FOREACH(p, &kmem_1gig_pages, list) {
         va = kmem_1gig_find_free(p, size);
         if (va != 0) {
-            uint64_t node_size;
-
-            node_size = round_up_to_power_of_2(size);
-            p->bytes_free -= node_size;
-            p->bytes_allocated += size;
-            p->bytes_handed_out += node_size;
-
-            printf(
-                "kmem_malloc_1gig: allocated %ld bytes (%ld bytes handed out) from 1gig page at 0x%016lx, %lu bytes left (%lu kB, %lu MB)\n",
-                size,
-                node_size,
-                p->va,
-                p->bytes_free,
-                (p->bytes_free / 1024),
-                (p->bytes_free / (1024*1024))
-            );
-
             // found one, return it quick!
+            kmem_1gig_alloc_bookkeeping(p, size);
             kmem_1gig_sort_page_list(p);
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
@@ -435,24 +467,8 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
         // we got a new 1gig page!
         va = kmem_1gig_find_free(p, size);
         if (va != 0) {
-            uint64_t node_size;
-
-            node_size = round_up_to_power_of_2(size);
-            p->bytes_free -= node_size;
-            p->bytes_allocated += size;
-            p->bytes_handed_out += node_size;
-
-            printf(
-                "kmem_malloc_1gig: allocated %ld bytes (%ld bytes handed out) from 1gig page at 0x%016lx, %lu bytes left (%lu kB, %lu MB)\n",
-                size,
-                node_size,
-                p->va,
-                p->bytes_free,
-                (p->bytes_free / 1024),
-                (p->bytes_free / (1024*1024))
-            );
-
             // found one, return it quick!
+            kmem_1gig_alloc_bookkeeping(p, size);
             kmem_1gig_sort_page_list(p);
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
@@ -633,28 +649,10 @@ kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
     // find the 1 gig page that has this va
     TAILQ_FOREACH(p, &kmem_1gig_pages, list) {
         if ((addr & ~((1024UL*1024*1024)-1)) == p->va) {
-            uint64_t node_size;
-
             // free this memory back to this page
             kmem_free_1gig_to_page(p, addr, size);
             kmem_1gig_sort_page_list(p);
-
-            node_size = round_up_to_power_of_2(size);
-            p->bytes_free += node_size;
-            p->bytes_allocated -= size;
-            p->bytes_handed_out -= node_size;
-
-            printf(
-                "kmem_free_1gig: freed %ld bytes (%ld bytes returned) to 1gig page at 0x%016lx, now has %lu bytes free (%lu kB, %lu MB)\n",
-                size,
-                node_size,
-                p->va,
-                p->bytes_free,
-                (p->bytes_free / 1024),
-                (p->bytes_free / (1024*1024))
-            );
-
-            // found one, return it quick!
+            kmem_1gig_free_bookkeeping(p, size);
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
             }
