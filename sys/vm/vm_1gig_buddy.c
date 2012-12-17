@@ -434,6 +434,11 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
     vm_offset_t va;
     struct kmem_1gig_page *p;
 
+    if (map != kmem_map) {
+        printf("1gig alloc: not kmem_map, punting to old malloc (size=%lu)\n", size);
+        return kmem_malloc_real(map, size, flags);
+    }
+
     if (size > 1024*1024*1024) {
         // punt
         printf("kmem_malloc_1gig: request is too big, punting to the real allocator\n");
@@ -641,6 +646,12 @@ void
 kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
 {
     struct kmem_1gig_page *p;
+
+    if (map != kmem_map) {
+        printf("1gig alloc: not kmem_map, punting to old free (va=0x%016lx, size=%lu)\n", addr, size);
+        kmem_free_real(map, addr, size);
+        return;
+    }
 
     if (!cold) {
         mtx_lock(&kmem_1gig_mutex);
