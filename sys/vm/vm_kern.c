@@ -220,7 +220,6 @@ kmem_free_real(map, addr, size)
 	vm_offset_t addr;
 	vm_size_t size;
 {
-	KASSERT(map != kmem_map, ("kmem_free_real: got kmem_map!\n"));
 	(void) vm_map_remove(map, trunc_page(addr), round_page(addr + size));
 }
 
@@ -296,8 +295,6 @@ kmem_malloc_real(map, size, flags)
 {
 	vm_offset_t addr;
 	int i, rv;
-
-	KASSERT(map != kmem_map, ("kmem_malloc_real: got kmem_map!\n"));
 
 	size = round_page(size);
 	addr = vm_map_min(map);
