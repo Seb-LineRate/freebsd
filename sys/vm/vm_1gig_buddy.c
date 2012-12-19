@@ -295,6 +295,8 @@ kmem_1gig_remove_node(struct kmem_1gig_page *p, struct kmem_1gig_free_node *n)
 
     KASSERT(p != NULL, ("kmem_1gig_remove_node: got NULL 1gig page!\n"));
     KASSERT(n != NULL, ("kmem_1gig_remove_node: got NULL node!\n"));
+    KASSERT(n->left_child == NULL, ("%s: got a node with a left child!\n", __FUNCTION__));
+    KASSERT(n->right_child == NULL, ("%s: got a node with a right child!\n", __FUNCTION__));
 
     while ((n->left_child == NULL) && (n->right_child == NULL)) {
         if (n->parent == NULL) {
@@ -337,6 +339,9 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
         // there is no free chunk in this 1 gig page suitable for this allocation
         return 0;
     }
+
+    KASSERT(n->left_child == NULL, ("%s: kmem_1gig_find_free_node() returned a node with children!", __FUNCTION__));
+    KASSERT(n->right_child == NULL, ("%s: kmem_1gig_find_free_node() returned a node with children!", __FUNCTION__));
 
     // n is the node we should use to satisfy the allocation
 
