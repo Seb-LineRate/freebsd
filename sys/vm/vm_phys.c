@@ -247,7 +247,7 @@ sysctl_dump_kern_pmap_pagesizes(SYSCTL_HANDLER_ARGS)
         int num_2meg_pages = 0;
         int num_4k_pages = 0;
 
-	sb = sbuf_new(NULL, NULL, 20 * 1024, SBUF_FIXEDLEN);
+	sb = sbuf_new_auto();
 	if (sb == NULL) {
 		printf("out of memory in lros.dump_kern_pmap_pagesizes sysctl\n");
 		return ENOMEM;
