@@ -171,80 +171,46 @@ static void kmem_1gig_sort_page_list(struct kmem_1gig_page *p) {
         if (prev == NULL) {
             // p is the head of the list
             if (next == NULL) {
-                return;
+                break;
             }
             if (p->bytes_free > next->bytes_free) {
-                // swap p and next and sort again
-                struct kmem_1gig_page *next_next;
-                next_next = TAILQ_NEXT(next, list);
-                TAILQ_NEXT(next, list) = p;
-                TAILQ_PREV(p, kmem_1gig_page_list, list) = next;
-                TAILQ_PREV(p, kmem_1gig_page_list, list) = next_next;
+                // move P to be after Next, and sort again
+                TAILQ_REMOVE(&kmem_1gig_pages, p, list);
+                TAILQ_INSERT_AFTER(&kmem_1gig_pages, next, p, list);
                 continue;
             } else {
-                return;
+                break;
             }
 
         } else if (next == NULL) {
             // p is the tail of the list
             // prev is not NULL
             if (p->bytes_free < prev->bytes_free) {
-                // swap p and prev and sort again
-                struct kmem_1gig_page *prev_prev;
-                prev_prev = TAILQ_PREV(prev, kmem_1gig_page_list, list);
-                TAILQ_PREV(prev, kmem_1gig_page_list, list) = p;
-                TAILQ_NEXT(p, list) = prev;
-                TAILQ_PREV(p, kmem_1gig_page_list, list) = prev_prev;
+                // move P to be before Prev, and sort again
+                TAILQ_REMOVE(&kmem_1gig_pages, p, list);
+                TAILQ_INSERT_BEFORE(prev, p, list);
                 continue;
             } else {
-                return;
+                break;
             }
 
         } else {
             // p is somewhere in the middle of the list
             if (p->bytes_free < prev->bytes_free) {
-                // swap p and prev and sort again
-                struct kmem_1gig_page *prev_prev;
-
-                prev_prev = TAILQ_PREV(prev, kmem_1gig_page_list, list);
-
-                if (prev_prev != NULL) {
-                    TAILQ_NEXT(prev_prev, list) = p;
-                }
-
-                TAILQ_PREV(prev, kmem_1gig_page_list, list) = p;
-                TAILQ_NEXT(prev, list) = next;
-
-                TAILQ_PREV(p, kmem_1gig_page_list, list) = prev_prev;
-                TAILQ_NEXT(p, list) = prev;
-
-                TAILQ_PREV(next, kmem_1gig_page_list, list) = prev;
-
+                // move P to be before Prev, and sort again
+                TAILQ_REMOVE(&kmem_1gig_pages, p, list);
+                TAILQ_INSERT_BEFORE(prev, p, list);
                 continue;
 
             } else if (p->bytes_free > next->bytes_free) {
-                // swap p and next and sort again
-                struct kmem_1gig_page *next_next;
-
-                next_next = TAILQ_NEXT(next, list);
-
-                if (next_next != NULL) {
-                    TAILQ_PREV(next_next, kmem_1gig_page_list, list) = p;
-                }
-
-                TAILQ_NEXT(next, list) = p;
-                TAILQ_PREV(next, kmem_1gig_page_list, list) = prev;
-
-                TAILQ_NEXT(p, list) = next_next;
-                TAILQ_PREV(p, kmem_1gig_page_list, list) = next;
-
-                TAILQ_NEXT(prev, list) = next;
-
+                // move P to be after Next, and sort again
+                TAILQ_REMOVE(&kmem_1gig_pages, p, list);
+                TAILQ_INSERT_AFTER(&kmem_1gig_pages, next, p, list);
                 continue;
             }
 
             // p is where it belongs
-            return;
+            break;
         }
     } while (1);
 
