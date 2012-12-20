@@ -667,8 +667,8 @@ kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
         if ((addr & ~((1024UL*1024*1024)-1)) == p->va) {
             // free this memory back to this page
             kmem_free_1gig_to_page(p, addr, size);
-            kmem_1gig_sort_page_list(p);
             kmem_1gig_free_bookkeeping(p, size);
+            kmem_1gig_sort_page_list(p);
             if (!cold) {
                 mtx_unlock(&kmem_1gig_mutex);
             }
