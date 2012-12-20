@@ -446,7 +446,7 @@ kmem_malloc_1gig(vm_map_t map, vm_size_t size, int flags)
     struct kmem_1gig_page *p;
 
     if (map != kmem_map) {
-        printf("1gig alloc: not kmem_map, punting to old malloc (size=%lu)\n", size);
+        // printf("1gig alloc: not kmem_map, punting to old malloc (size=%lu)\n", size);
         return kmem_malloc_real(map, size, flags);
     }
 
@@ -659,7 +659,7 @@ kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
     struct kmem_1gig_page *p;
 
     if (map != kmem_map) {
-        printf("1gig alloc: not kmem_map, punting to old free (va=0x%016lx, size=%lu)\n", addr, size);
+        // printf("1gig alloc: not kmem_map, punting to old free (va=0x%016lx, size=%lu)\n", addr, size);
         kmem_free_real(map, addr, size);
         return;
     }
