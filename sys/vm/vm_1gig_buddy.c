@@ -282,10 +282,12 @@ kmem_1gig_find_free_node(struct kmem_1gig_free_node *root, vm_size_t size)
 }
 
 
-// remove the specified node from the specified tree (but don't free it)
+// remove the specified node from the specified tree
 static void
 kmem_1gig_remove_node(struct kmem_1gig_page *p, struct kmem_1gig_free_node *n)
 {
+    struct kmem_1gig_free_node *parent;
+
     KASSERT(cold || mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
 
     KASSERT(p != NULL, ("kmem_1gig_remove_node: got NULL 1gig page!\n"));
@@ -294,19 +296,25 @@ kmem_1gig_remove_node(struct kmem_1gig_page *p, struct kmem_1gig_free_node *n)
     KASSERT(n->right_child == NULL, ("%s: got a node with a right child!\n", __FUNCTION__));
 
     while ((n->left_child == NULL) && (n->right_child == NULL)) {
-        if (n->parent == NULL) {
+        parent = n->parent;
+
+        if (parent == NULL) {
             // the node is the root of the tree
+            KASSERT(n == p->root, ("%s: non-root node has NULL parent!\n", __FUNCTION__));
+            kmem_free_real(kmem_map, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
             p->root = NULL;
             return;
         }
 
-        if (n == n->parent->left_child) {
-            n->parent->left_child = NULL;
+        if (n == parent->left_child) {
+            parent->left_child = NULL;
         } else {
-            n->parent->right_child = NULL;
+            KASSERT(n == parent->right_child, ("%s: node is not its parent's child!\n", __FUNCTION__));
+            parent->right_child = NULL;
         }
 
-        n = n->parent;
+        kmem_free_real(kmem_map, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
+        n = parent;
     }
 }
 
@@ -372,11 +380,14 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
         n = n->left_child;
     }
 
-    // remove the node from the tree if possible
-    kmem_1gig_remove_node(p, n);
+    // here, n is the node we're going to actually give to the user
 
     va = n->va;
-    kmem_free_real(kmem_map, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
+
+    // remove the node from the tree, and any of its ancestors that
+    // are free after removing this node
+    kmem_1gig_remove_node(p, n);
+
     return va;
 }
 
