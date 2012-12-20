@@ -144,6 +144,21 @@ static void kmem_1gig_sort_page_list(struct kmem_1gig_page *p) {
         next = TAILQ_NEXT(p, list);
 
 #if 0
+        {
+            struct kmem_1gig_page *tmp;
+            printf("starting sorting pages:\n");
+            TAILQ_FOREACH(tmp, &kmem_1gig_pages, list) {
+                if (tmp == p) {
+                    printf("{ *** va=0x%016lx, bytes_free=%ld *** }  ", tmp->va, tmp->bytes_free);
+                } else {
+                    printf("{ va=0x%016lx, bytes_free=%ld }  ", tmp->va, tmp->bytes_free);
+                }
+            }
+            printf("\n");
+        }
+#endif
+
+#if 0
         printf(
             "1gig alloc: should sort pages, prev->bytes_free=%ld, p->bytes_free=%ld, next->bytes_free=%ld\n",
             (prev != NULL ? prev->bytes_free : -1),
@@ -232,6 +247,20 @@ static void kmem_1gig_sort_page_list(struct kmem_1gig_page *p) {
             return;
         }
     } while (1);
+
+#if 0
+    // debuggingly print out the list of 1 gig pages
+    // printf("finished sorting pages:\n");
+    TAILQ_FOREACH(p, &kmem_1gig_pages, list) {
+        struct kmem_1gig_page *tmp;
+        if (tmp == p) {
+            printf("{ *** va=0x%016lx, bytes_free=%ld *** }  ", tmp->va, tmp->bytes_free);
+        } else {
+            printf("{ va=0x%016lx, bytes_free=%ld }  ", tmp->va, tmp->bytes_free);
+        }
+    }
+    printf("\n");
+#endif
 }
 
 
@@ -681,6 +710,7 @@ kmem_free_1gig(vm_map_t map, vm_offset_t addr, vm_size_t size)
     }
 
     // couldnt find a page for that VA, must be from the regular allocator
+    printf("1gig alloc: free punting to old allocator (va=0x%016lx, size=%lu)\n", addr, size);
     kmem_free_real(map, addr, size);
 }
 
