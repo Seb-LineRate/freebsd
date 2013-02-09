@@ -127,16 +127,16 @@ static void vm_phys_split_pages(vm_page_t m, int oind, struct vm_freelist *fl,
     int order);
 
 static int vm_pid_to_dump_pmap = -1;
-SYSCTL_INT(_lros_debug, OID_AUTO, pid_to_dump_pmap, CTLFLAG_RW, &vm_pid_to_dump_pmap, 0, "The PID to show the pmap for (-1 to disable).");
+SYSCTL_INT(_debug, OID_AUTO, pid_to_dump_pmap, CTLFLAG_RW, &vm_pid_to_dump_pmap, 0, "The PID to show the pmap for (-1 to disable).");
 
 static uint64_t vm_pointer_to_dump_pmap = 0;
-SYSCTL_ULONG(_lros_debug, OID_AUTO, pointer_to_dump_pmap, CTLFLAG_RW, &vm_pointer_to_dump_pmap, 0, "The pointer to show the pmap for (0 to disable).");
+SYSCTL_ULONG(_debug, OID_AUTO, pointer_to_dump_pmap, CTLFLAG_RW, &vm_pointer_to_dump_pmap, 0, "The pointer to show the pmap for (0 to disable).");
 
 static int sysctl_dump_pmap(SYSCTL_HANDLER_ARGS);
-SYSCTL_PROC(_lros_debug, OID_AUTO, dump_pmap, CTLTYPE_STRING | CTLFLAG_RD, NULL, 0, sysctl_dump_pmap, "A", "Process pmap");
+SYSCTL_PROC(_debug, OID_AUTO, dump_pmap, CTLTYPE_STRING | CTLFLAG_RD, NULL, 0, sysctl_dump_pmap, "A", "Process pmap");
 
 static int sysctl_dump_kern_pmap_pagesizes(SYSCTL_HANDLER_ARGS);
-SYSCTL_PROC(_lros_debug, OID_AUTO, dump_kern_pmap_pagesizes, CTLTYPE_STRING | CTLFLAG_RD, NULL, 0, sysctl_dump_kern_pmap_pagesizes, "A", "Kernel pmap pagesizes");
+SYSCTL_PROC(_debug, OID_AUTO, dump_kern_pmap_pagesizes, CTLTYPE_STRING | CTLFLAG_RD, NULL, 0, sysctl_dump_kern_pmap_pagesizes, "A", "Kernel pmap pagesizes");
 
 /*
  * Outputs the state of the physical memory allocator, specifically,
@@ -249,7 +249,7 @@ sysctl_dump_kern_pmap_pagesizes(SYSCTL_HANDLER_ARGS)
 
 	sb = sbuf_new(NULL, NULL, 20 * 1024, SBUF_FIXEDLEN);
 	if (sb == NULL) {
-		printf("out of memory in lros.dump_kern_pmap_pagesizes sysctl\n");
+		printf("out of memory in dump_kern_pmap_pagesizes sysctl\n");
 		return ENOMEM;
 	}
 
@@ -591,19 +591,19 @@ sysctl_dump_pmap(SYSCTL_HANDLER_ARGS)
 
 	sb = sbuf_new(NULL, NULL, 2 * 1024, SBUF_FIXEDLEN);
 	if (sb == NULL) {
-		printf("out of memory in lros.dump_pmap sysctl\n");
+		printf("out of memory in dump_pmap sysctl\n");
 		return ENOMEM;
 	}
 
 	if (vm_pointer_to_dump_pmap == 0) {
-		sbuf_printf(sb, "no pointer specified in lros.pointer_to_dump_pmap\n");
+		sbuf_printf(sb, "no pointer specified in pointer_to_dump_pmap\n");
 		goto done;
 	}
 
 	// pfind() returns the process locked
 	p = pfind(vm_pid_to_dump_pmap);
 	if (p == NULL) {
-		sbuf_printf(sb, "lros.pid_to_dump_pmap %d not found\n", vm_pid_to_dump_pmap);
+		sbuf_printf(sb, "pid_to_dump_pmap %d not found\n", vm_pid_to_dump_pmap);
 		goto done;
 	}
 
