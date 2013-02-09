@@ -726,7 +726,7 @@ kmem_1gig_count_free_chunks(struct kmem_1gig_free_node *n, vm_size_t size)
 // set it to a negative value to free the allocation slot
 static int sysctl_1gig_buddy_alloc(SYSCTL_HANDLER_ARGS);
 SYSCTL_PROC(
-    _lros_debug,
+    _debug,
     OID_AUTO,
     kmem_1gig_buddy_alloc,
     CTLTYPE_LONG | CTLFLAG_WR,
@@ -740,7 +740,7 @@ SYSCTL_PROC(
 // read this to see the allocation slots
 static int sysctl_1gig_buddy_alloc_state(SYSCTL_HANDLER_ARGS);
 SYSCTL_PROC(
-    _lros_debug,
+    _debug,
     OID_AUTO,
     kmem_1gig_buddy_alloc_state,
     CTLTYPE_STRING | CTLFLAG_RD,
