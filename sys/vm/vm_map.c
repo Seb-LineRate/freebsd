@@ -99,13 +99,13 @@ __FBSDID("$FreeBSD$");
 
 
 static int vm_pid_to_dump_vm_map = -1;
-SYSCTL_INT(_lros_debug, OID_AUTO, pid_to_dump_vm_map, CTLFLAG_RW, &vm_pid_to_dump_vm_map, 0, "The PID to show the vm_map for (-1 to disable).");
+SYSCTL_INT(_debug, OID_AUTO, pid_to_dump_vm_map, CTLFLAG_RW, &vm_pid_to_dump_vm_map, 0, "The PID to show the vm_map for (-1 to disable).");
 
 static uint64_t vm_pointer_to_dump_vm_map = 0;
-SYSCTL_ULONG(_lros_debug, OID_AUTO, pointer_to_dump_vm_map, CTLFLAG_RW, &vm_pointer_to_dump_vm_map, 0, "The pointer to show the vm_map for (0 to disable).");
+SYSCTL_ULONG(_debug, OID_AUTO, pointer_to_dump_vm_map, CTLFLAG_RW, &vm_pointer_to_dump_vm_map, 0, "The pointer to show the vm_map for (0 to disable).");
 
 static int sysctl_dump_vm_map(SYSCTL_HANDLER_ARGS);
-SYSCTL_PROC(_lros_debug, OID_AUTO, dump_vm_map, CTLTYPE_STRING | CTLFLAG_RD, NULL, 0, sysctl_dump_vm_map, "A", "Process vm_map");
+SYSCTL_PROC(_debug, OID_AUTO, dump_vm_map, CTLTYPE_STRING | CTLFLAG_RD, NULL, 0, sysctl_dump_vm_map, "A", "Process vm_map");
 
 
 /*
@@ -4130,19 +4130,19 @@ sysctl_dump_vm_map(SYSCTL_HANDLER_ARGS)
 
 	sb = sbuf_new(NULL, NULL, 100 * 1024, SBUF_FIXEDLEN);
 	if (sb == NULL) {
-		printf("out of memory in lros.dump_vmmap sysctl\n");
+		printf("out of memory in dump_vmmap sysctl\n");
 		return ENOMEM;
 	}
 
 	if (vm_pointer_to_dump_vm_map == 0) {
-		sbuf_printf(sb, "no pointer specified in lros.pointer_to_dump_vm_map\n");
+		sbuf_printf(sb, "no pointer specified in pointer_to_dump_vm_map\n");
 		goto done;
 	}
 
 	// pfind() returns the process locked
 	p = pfind(vm_pid_to_dump_vm_map);
 	if (p == NULL) {
-		sbuf_printf(sb, "lros.pid_to_dump_vm_map %d not found\n", vm_pid_to_dump_vm_map);
+		sbuf_printf(sb, "pid_to_dump_vm_map %d not found\n", vm_pid_to_dump_vm_map);
 		goto done;
 	}
 
