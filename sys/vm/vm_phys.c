@@ -1373,4 +1373,52 @@ DB_SHOW_COMMAND(freepages, db_show_freepages)
 		db_printf("\n");
 	}
 }
+
+static int
+mydb_printf(void * unused, const char * fmt, ...)
+{
+	int retval;
+	va_list ap;
+
+	va_start(ap, fmt);
+	retval = db_vprintf(fmt, ap);
+	va_end(ap);
+
+	return(retval);
+}
+
+/*
+ *  Dump pmap upto a virtual address.
+ *
+ *  Takes 2 pointer arguments, so standard DB_SHOW_COMMAND macro can't be used
+ */
+_DB_FUNC(_show, pmap, db_show_pmap, db_show_table, CS_OWN, NULL)
+{
+	struct pmap *pmap;
+	db_expr_t value;
+
+	if (!db_expression(&value)) {
+		db_skip_to_eol();
+		db_printf("usage: show pmap <struct pmap *> <v_addr>\n");
+		return;
+	}
+	pmap = (struct pmap*)value;
+
+	if (!db_expression(&value)) {
+		db_skip_to_eol();
+		db_printf("usage: show pmap <struct pmap *> <v_addr>\n");
+		return;
+	}
+	vm_pointer_to_dump_pmap = (uint64_t)value;
+	db_skip_to_eol();
+
+	//PMAP_LOCK(pmap)
+
+	db_printf("physical map: %p walking to VA: %p\n",
+	    pmap, (void*)vm_pointer_to_dump_pmap);
+	db_dump_pml4(mydb_printf, NULL, pmap->pm_pml4);
+
+	//PMAP_UNLOCK(pmap);
+}
+
 #endif
