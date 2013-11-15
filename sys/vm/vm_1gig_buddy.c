@@ -26,25 +26,76 @@
 
 //
 // This struct is a node in a binary tree of power-of-2-sized memory
-// regions backed by a 1 gig page.
+// regions backed by a 1 gig page.  The binary tree uses these nodes to
+// track free and allocated memory chunks.  Children are half the size of
+// their parent.  Siblings track adjacent, aligned memory areas.
 //
-// If a node has no children (both left_child and right_child are NULL), it
-// means the whole node is free.
+// Allocation:
 //
-// If a node has one or two children, it means that the memory tracked by
-// the node is partially free and partially in use.  In this case, a
-// missing child (a child pointer that is NULL), indicates that the missing
-// child is fully allocated.  A child pointer that is not NULL points to a
-// node that is not fully allocated, ie it is at least partially free.
+//     When a memory allocation request is made of this allocator, the
+//     allocator searches the tree for the smallest usable free chunk
+//     (the smallest free chunk that's not too small), splits it until it
+//     can't split it any more, marks the final node as allocated (by
+//     setting the 'in-use' flag in the node's VA), and returns it.
+//
+//     Splitting a node consists of allocating two new nodes and hanging
+//     them off the current node's child pointers.
+//
+//     If both a parent's children are marked as allocated (with the
+//     in-use flag in the VA), the parent is marked as allocated.
+//
+// Freeing:
+//
+//     When memory is freed back to this allocator, the VA of the memory
+//     is used to find the node representing the memory chunk.  The node
+//     is marked free (by clearing the in-use bit in its VA).
+//
+//     Free nodes get "collapsed" up the tree.  If two siblings are both
+//     free they are removed, their node data structures are freed and
+//     the child pointers in their parent are NULLed out, making the
+//     parent into a leaf node.  The two free memory areas that the
+//     children used to track are coalesced into one and tracked by the
+//     parent.  Thus an entirely free gig of memory is tracked by a
+//     single node.
+//
+// Data structure invariants:
+//
+//     The tree has a node for every allocated chunk, and a node for every
+//     free chunk.
+//
+//     A node has either 0 or 2 children.  In other words, every node
+//     (except the root node) has a sibling.
+//
+//     If a node is marked as in-use (by having the in-use flag set in
+//     its VA), and it has children, then the children are also marked as
+//     in-use.
+//
+//     A node never has two free children.  When a user frees a node that
+//     has a free sibling, the node and its sibling are both removed from
+//     the tree, making the parent node into a leaf-node.  This is called
+//     'consolidation'.
 //
 
-struct kmem_1gig_free_node {
+struct kmem_1gig_node {
     vm_offset_t va;
     size_t size;
-    struct kmem_1gig_free_node *parent;
-    struct kmem_1gig_free_node *left_child;
-    struct kmem_1gig_free_node *right_child;
+    struct kmem_1gig_node *parent;
+    struct kmem_1gig_node *left_child;
+    struct kmem_1gig_node *right_child;
 };
+
+#define KMEM_1GIG_LEFT_IN_USE  0x1 // left half has been allocated
+#define KMEM_1GIG_RIGHT_IN_USE 0x2 // right half has been allocated
+
+#define KMEM_1GIG_IN_USE (KMEM_1GIG_LEFT_IN_USE | KMEM_1GIG_RIGHT_IN_USE)
+
+#define NODE_IS_FREE(n) ((n->va & KMEM_1GIG_IN_USE) == 0)
+#define NODE_IS_ALLOCATED(n) ((n->va & KMEM_1GIG_IN_USE) == KMEM_1GIG_IN_USE)
+
+#define NODE_IS_LEAF(n) ((n->left_child == NULL) && (n->right_child == NULL))
+
+#define NODE_HAS_BOTH_CHILDREN(n)  \
+    ((n->left_child != NULL) && (n->right_child != NULL))
 
 
 //
@@ -53,20 +104,32 @@ struct kmem_1gig_free_node {
 // kernel (including uma slabs).
 //
 struct kmem_1gig_page {
-    TAILQ_ENTRY(kmem_1gig_page) list;   // list of 1 gig pages used by the allocator
-    struct kmem_1gig_free_node *root;         // root of the free-node tree
+    // list of 1 gig pages used by the allocator
+    TAILQ_ENTRY(kmem_1gig_page) list;
+    // root of the free-node tree
+    struct kmem_1gig_node *root;
     vm_offset_t va;
     uint64_t bytes_free;
     uint64_t bytes_allocated;    // how much did our users ask for?
-    uint64_t bytes_handed_out;   // how much did we actually give our users?  (it'll probably be more than bytes_allocated because we round up to a power of 2)
+    // how much did we actually give our users?  (it'll probably be more
+    // than bytes_allocated because we round up to a power of 2)
+    uint64_t bytes_handed_out;
 };
 
 
-
-TAILQ_HEAD(kmem_1gig_page_list, kmem_1gig_page) kmem_1gig_pages = TAILQ_HEAD_INITIALIZER(kmem_1gig_pages);
+TAILQ_HEAD(kmem_1gig_page_list, kmem_1gig_page) kmem_1gig_pages =
+	TAILQ_HEAD_INITIALIZER(kmem_1gig_pages);
 
 static struct mtx kmem_1gig_mutex;
 MTX_SYSINIT(kmem_1gig_mutex, &kmem_1gig_mutex, "kmem 1gig mutex", MTX_DEF);
+
+#define KASSERT_MTX_OWNED()                                   \
+    do {                                                      \
+        KASSERT(                                              \
+            cold || mtx_owned(&kmem_1gig_mutex),              \
+            ("%s: kmem 1gig mutex not owned!", __FUNCTION__)  \
+        );                                                    \
+    } while(0)
 
 
 static inline uint64_t round_up_to_power_of_2(uint64_t x) {
@@ -88,55 +151,40 @@ static inline uint64_t round_up_to_power_of_2(uint64_t x) {
 }
 
 
-static inline void kmem_1gig_alloc_bookkeeping(struct kmem_1gig_page *p, vm_size_t size) {
+static inline void kmem_1gig_alloc_bookkeeping(
+    struct kmem_1gig_page *p,
+    vm_size_t size
+) {
     uint64_t node_size;
 
-    KASSERT(p != NULL, ("kmem_1gig_alloc_bookkeeping: got NULL page!\n"));
+    KASSERT_MTX_OWNED();
+    KASSERT(p != NULL, ("%s: got NULL page!\n", __FUNCTION__));
 
     node_size = round_up_to_power_of_2(size);
     p->bytes_free -= node_size;
     p->bytes_allocated += size;
     p->bytes_handed_out += node_size;
-
-#if 0
-    printf(
-        "1gig buddy allocator: allocated %ld bytes (%ld bytes handed out) from 1gig page at 0x%016lx, %lu bytes left (%lu kB, %lu MB)\n",
-        size,
-        node_size,
-        p->va,
-        p->bytes_free,
-        (p->bytes_free / 1024),
-        (p->bytes_free / (1024*1024))
-    );
-#endif
 }
 
 
-static inline void kmem_1gig_free_bookkeeping(struct kmem_1gig_page *p, vm_size_t size) {
+static inline void kmem_1gig_free_bookkeeping(
+    struct kmem_1gig_page *p,
+    vm_size_t size
+) {
     uint64_t node_size;
 
+    KASSERT_MTX_OWNED();
     KASSERT(p != NULL, ("kmem_1gig_free_bookkeeping: got NULL page!\n"));
 
     node_size = round_up_to_power_of_2(size);
     p->bytes_free += node_size;
     p->bytes_allocated -= size;
     p->bytes_handed_out -= node_size;
-
-#if 0
-    printf(
-        "1gig buddy allocator: freed %ld bytes (%ld bytes returned) to 1gig page at 0x%016lx, now has %lu bytes free (%lu kB, %lu MB)\n",
-        size,
-        node_size,
-        p->va,
-        p->bytes_free,
-        (p->bytes_free / 1024),
-        (p->bytes_free / (1024*1024))
-    );
-#endif
 }
 
 
 static void kmem_1gig_sort_page_list(struct kmem_1gig_page *p) {
+    KASSERT_MTX_OWNED();
     do {
         struct kmem_1gig_page *prev, *next;
 
@@ -205,37 +253,55 @@ static void kmem_1gig_sort_page_list(struct kmem_1gig_page *p) {
 // Walk a free node tree and return the node that should be used to satisfy
 // the allocation, or NULL if no appropriate node was found.
 //
-static struct kmem_1gig_free_node *
-kmem_1gig_find_free_node(struct kmem_1gig_free_node *root, vm_size_t size)
+static struct kmem_1gig_node *
+kmem_1gig_find_free_node(struct kmem_1gig_node *root, vm_size_t size)
 {
-    struct kmem_1gig_free_node *node_from_left_child;
-    struct kmem_1gig_free_node *node_from_right_child;
+    struct kmem_1gig_node *node_from_left_child;
+    struct kmem_1gig_node *node_from_right_child;
 
-    KASSERT(cold || mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
-
-    if (root == NULL) {
-        // this entire tree is in use!
-        return NULL;
-    }
+    KASSERT_MTX_OWNED();
+    KASSERT(root != NULL, ("%s: NULL root node passed in", __FUNCTION__));
 
     if (root->size < size) {
-        // this entire tree, even if it was all free, is too small
+        // this entire (sub-)tree, even if it was all free, is too small
         return NULL;
     }
 
-    if ((root->left_child == NULL) && (root->right_child == NULL)) {
-        // there are no nodes below this one, so this is the one to use!
+    if (NODE_IS_ALLOCATED(root)) {
+        // no free memory at or below this node
+        return NULL;
+    }
+
+    if (NODE_IS_LEAF(root)) {
+        // this is a leaf node, so this is the one to use!
+        // the caller will split the node, if appropriate
         return root;
     }
 
+    KASSERT(
+        NODE_HAS_BOTH_CHILDREN(root),
+        ("%s: passed-in root node has only one child", __FUNCTION__)
+    );
+
     if (root->size/2 < size) {
         // this node is not all free (it's not a leaf node),
-        // and each of the children is too small for this request
+        // and the children are too small for this request
         return NULL;
     }
 
-    node_from_left_child = kmem_1gig_find_free_node(root->left_child, size);
-    node_from_right_child = kmem_1gig_find_free_node(root->right_child, size);
+    if ((root->va & KMEM_1GIG_LEFT_IN_USE) == 0) {
+        node_from_left_child =
+            kmem_1gig_find_free_node(root->left_child, size);
+    } else {
+        node_from_left_child = NULL;
+    }
+
+    if ((root->va & KMEM_1GIG_RIGHT_IN_USE) == 0) {
+        node_from_right_child =
+            kmem_1gig_find_free_node(root->right_child, size);
+    } else {
+        node_from_right_child = NULL;
+    }
 
     if (node_from_left_child == NULL) {
         return node_from_right_child;
@@ -253,43 +319,6 @@ kmem_1gig_find_free_node(struct kmem_1gig_free_node *root, vm_size_t size)
 }
 
 
-// remove the specified node from the specified tree
-static void
-kmem_1gig_remove_node(struct kmem_1gig_page *p, struct kmem_1gig_free_node *n)
-{
-    struct kmem_1gig_free_node *parent;
-
-    KASSERT(cold || mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
-
-    KASSERT(p != NULL, ("kmem_1gig_remove_node: got NULL 1gig page!\n"));
-    KASSERT(n != NULL, ("kmem_1gig_remove_node: got NULL node!\n"));
-    KASSERT(n->left_child == NULL, ("%s: got a node with a left child!\n", __FUNCTION__));
-    KASSERT(n->right_child == NULL, ("%s: got a node with a right child!\n", __FUNCTION__));
-
-    while ((n->left_child == NULL) && (n->right_child == NULL)) {
-        parent = n->parent;
-
-        if (parent == NULL) {
-            // the node is the root of the tree
-            KASSERT(n == p->root, ("%s: non-root node has NULL parent!\n", __FUNCTION__));
-            kmem_free_real(kmem_arena, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
-            p->root = NULL;
-            return;
-        }
-
-        if (n == parent->left_child) {
-            parent->left_child = NULL;
-        } else {
-            KASSERT(n == parent->right_child, ("%s: node is not its parent's child!\n", __FUNCTION__));
-            parent->right_child = NULL;
-        }
-
-        kmem_free_real(kmem_arena, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
-        n = parent;
-    }
-}
-
-
 //
 // See if there's a free chunk of the requested size on this 1 gig page.
 //
@@ -300,38 +329,62 @@ kmem_1gig_remove_node(struct kmem_1gig_page *p, struct kmem_1gig_free_node *n)
 static vm_offset_t
 kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
 {
-    struct kmem_1gig_free_node *n;
+    struct kmem_1gig_node *n;
     vm_offset_t va;
 
-    KASSERT(cold || mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
+    KASSERT_MTX_OWNED();
 
     if (size > p->bytes_free) return 0;
 
-    // find the best leaf node to use for this allocation
+    // find the best free node to use for this allocation
     n = kmem_1gig_find_free_node(p->root, size);
     if (n == NULL) {
-        // there is no free chunk in this 1 gig page suitable for this allocation
+        // there is no suitable free chunk in this 1 gig page
         return 0;
     }
 
-    KASSERT(n->left_child == NULL, ("%s: kmem_1gig_find_free_node() returned a node with children!", __FUNCTION__));
-    KASSERT(n->right_child == NULL, ("%s: kmem_1gig_find_free_node() returned a node with children!", __FUNCTION__));
+    KASSERT(
+        NODE_IS_FREE(n),
+        (
+            "%s: kmem_1gig_find_free_node() returned an in-use node!",
+            __FUNCTION__
+        )
+    );
+    KASSERT(
+        NODE_IS_LEAF(n),
+        (
+            "%s: kmem_1gig_find_free_node() returned a non leaf node!",
+            __FUNCTION__
+        )
+    );
 
-    // n is the node we should use to satisfy the allocation
+    // n is the free leaf-node we should use to satisfy the allocation
 
     // split the node, if possible
     while ((n->size > PAGE_SIZE) && (n->size/2 >= size)) {
-        n->left_child = (void*)kmem_malloc_real(kmem_arena, sizeof(struct kmem_1gig_free_node), M_NOWAIT);
+        n->left_child = (void*)kmem_malloc_real(
+            kmem_arena,
+            sizeof(struct kmem_1gig_node),
+            M_NOWAIT
+        );
         if (n->left_child == NULL) {
-            printf("kmem_1gig_find_free: out of memory while splitting node\n");
-            // oh well, let's just use this node I guess, even though it's too big
+            printf("%s: out of memory while splitting node\n", __FUNCTION__);
+            // oh well, let's just use this node even though it's too big
             break;
         }
 
-        n->right_child = (void*)kmem_malloc_real(kmem_arena, sizeof(struct kmem_1gig_free_node), M_NOWAIT);
+        n->right_child = (void*)kmem_malloc_real(
+            kmem_arena,
+            sizeof(struct kmem_1gig_node),
+            M_NOWAIT
+        );
         if (n->right_child == NULL) {
-            kmem_free_real(kmem_arena, (vm_offset_t)n->left_child, sizeof(struct kmem_1gig_free_node));
-            // oh well, let's just use this node I guess, even though it's too big
+            kmem_free_real(
+                kmem_arena,
+                (vm_offset_t)n->left_child,
+                sizeof(struct kmem_1gig_node)
+            );
+            // oh well, let's just use this node even though it's too big
             break;
         }
 
@@ -354,10 +407,22 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
     // here, n is the node we're going to actually give to the user
 
     va = n->va;
+    n->va |= KMEM_1GIG_IN_USE;
 
-    // remove the node from the tree, and any of its ancestors that
-    // are free after removing this node
-    kmem_1gig_remove_node(p, n);
+    // propagate the in-use flag up the tree
+    while ((n->parent != NULL) && NODE_IS_ALLOCATED(n)) {
+        n = n->parent;
+        KASSERT(
+            NODE_HAS_BOTH_CHILDREN(n),
+            ("%s: parent lacks children!", __FUNCTION__)
+        );
+        if (NODE_IS_ALLOCATED(n->left_child)) {
+            n->va |= KMEM_1GIG_LEFT_IN_USE;
+        }
+        if (NODE_IS_ALLOCATED(n->right_child)) {
+            n->va |= KMEM_1GIG_RIGHT_IN_USE;
+        }
+    }
 
     return va;
 }
@@ -367,11 +432,11 @@ static struct kmem_1gig_page *
 kmem_1gig_add_page(void)
 {
     struct kmem_1gig_page *p;
-    struct kmem_1gig_free_node *n;
+    struct kmem_1gig_node *n;
     vm_offset_t va;
     long one_gig = 1024 * 1024 * 1024;
 
-    KASSERT(cold || mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
+    KASSERT_MTX_OWNED();
 
     va = kmem_malloc_1gig_page(kmem_arena, M_NOWAIT);
     if (va == 0) {
@@ -383,15 +448,27 @@ kmem_1gig_add_page(void)
         return NULL;
     }
 
-    n = (void*)kmem_malloc_real(kmem_arena, sizeof(struct kmem_1gig_free_node), M_NOWAIT);
+    n = (void*)kmem_malloc_real(
+        kmem_arena,
+        sizeof(struct kmem_1gig_node),
+        M_NOWAIT
+    );
     if (n == NULL) {
         kmem_free_real(kmem_arena, va, one_gig);
         return NULL;
     }
 
-    p = (void*)kmem_malloc_real(kmem_arena, sizeof(struct kmem_1gig_page), M_NOWAIT);
+    p = (void*)kmem_malloc_real(
+        kmem_arena,
+        sizeof(struct kmem_1gig_page),
+        M_NOWAIT
+    );
     if (p == NULL) {
-        kmem_free_real(kmem_arena, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
+        kmem_free_real(
+            kmem_arena,
+            (vm_offset_t)n,
+            sizeof(struct kmem_1gig_node)
+        );
         kmem_free_real(kmem_arena, va, one_gig);
         return NULL;
     }
@@ -403,8 +480,8 @@ kmem_1gig_add_page(void)
     n->right_child = NULL;
 
     p->root = n;
-    p->va = va;
-    p->bytes_free = 1024UL * 1024UL * 1024UL;
+    p->va = n->va;
+    p->bytes_free = n->size;
     p->bytes_allocated = 0;
     p->bytes_handed_out = 0;
 
@@ -428,7 +505,7 @@ kmem_malloc_1gig(struct vmem *vmem, vm_size_t size, int flags)
 
     if (size > 1024*1024*1024) {
         // punt
-        printf("kmem_malloc_1gig: request is too big, punting to the real allocator\n");
+        printf("kmem_malloc_1gig: request too big, using the real allocator\n");
         return kmem_malloc_real(vmem, size, flags);
     }
 
@@ -436,7 +513,7 @@ kmem_malloc_1gig(struct vmem *vmem, vm_size_t size, int flags)
         mtx_lock(&kmem_1gig_mutex);
     }
 
-    // do we have a 1 gig page with a free chunk big enough for this allocation request?
+    // do we have a 1 gig page with a big enough free chunk?
     TAILQ_FOREACH(p, &kmem_1gig_pages, list) {
         va = kmem_1gig_find_free(p, size);
         if (va != 0) {
@@ -472,14 +549,13 @@ kmem_malloc_1gig(struct vmem *vmem, vm_size_t size, int flags)
         }
     }
 
-
     // fall back to the real allocator
     if (!cold) {
         mtx_unlock(&kmem_1gig_mutex);
     }
 
     if (!complained_once) {
-        printf("kmem_malloc_1gig: everything failed, punting to the real allocator\n");
+        printf("kmem_malloc_1gig: failed, using the real allocator\n");
         complained_once = 1;
     }
 
@@ -494,80 +570,103 @@ kmem_malloc_1gig(struct vmem *vmem, vm_size_t size, int flags)
 //
 
 static void
-kmem_1gig_coalesce(struct kmem_1gig_page *p, struct kmem_1gig_free_node *n)
+kmem_1gig_coalesce(struct kmem_1gig_node *n)
 {
-    struct kmem_1gig_free_node *parent;
-    struct kmem_1gig_free_node *sibling;
+    KASSERT_MTX_OWNED();
 
-    KASSERT(cold || mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
+    do {
+        struct kmem_1gig_node *parent;
+        struct kmem_1gig_node *sibling;
 
-    KASSERT(p != NULL, ("kmem_1gig_coalesce: got NULL 1gig page!\n"));
-    KASSERT(n != NULL, ("kmem_1gig_coalesce: got NULL node!\n"));
-    KASSERT(n->left_child == NULL, ("kmem_1gig_coalesce: got a node with a non-NULL left_child!\n"));
-    KASSERT(n->right_child == NULL, ("kmem_1gig_coalesce: got a node with a non-NULL right_child!\n"));
+        KASSERT(n != NULL, ("%s: got NULL node!\n", __FUNCTION__));
+        KASSERT(NODE_IS_FREE(n), ("%s: node is in use!\n", __FUNCTION__));
+        KASSERT(NODE_IS_LEAF(n), ("%s: got a non leaf node!\n", __FUNCTION__));
 
-    parent = n->parent;
-    if (parent == NULL) {
-        // we're at the top of the tree
-        KASSERT(n->size == 1024*1024*1024, ("kmem_1gig_coalesce: node lacks parent, but size is %lu (not 1 gig)\n", n->size));
-        return;
-    }
+        parent = n->parent;
+        if (parent == NULL) {
+            // the current node n is the top of the tree, cannot coalesce
+            // further
+            KASSERT(
+                n->size == 1024*1024*1024,
+                (
+                    "%s: node lacks parent, but size is %lu (not 1 gig)\n",
+                    __FUNCTION__,
+                    n->size
+                )
+            );
+            return;
+        }
+        // since this node is free, the parent can't be *fully* allocated
+        KASSERT(
+            0 == NODE_IS_ALLOCATED(parent),
+            ("%s: parent is marked in-use\n", __FUNCTION__)
+        );
 
-    if (n == parent->left_child) {
-        sibling = parent->right_child;
-    } else if (n == parent->right_child) {
-        sibling = parent->left_child;
-    } else {
-        panic("kmem_1gig_coalesce: node at %p has parent which doesnt have this node as a child\n", n);
-    }
+        if (n == parent->left_child) {
+            sibling = parent->right_child;
+        } else if (n == parent->right_child) {
+            sibling = parent->left_child;
+        } else {
+            panic(
+                "%s: node at %p has parent which doesnt have this node "
+                "as a child\n",
+                __FUNCTION__,
+                n
+            );
+        }
 
-    if (sibling == NULL) {
-        // sibling is completely allocated, we can not coalesce
-        return;
-    }
+        KASSERT(
+            sibling != NULL,
+            ("%s: sibling of passed-in node is NULL!", __FUNCTION__)
+        );
 
-    if ((sibling->left_child != NULL) || (sibling->right_child != NULL)) {
-        // sibling is partially allocated, we can not coalesce
-        return;
-    }
+        if (!NODE_IS_LEAF(sibling)) {
+            // sibling is not a leaf-node, we can not coalesce
+            return;
+        }
 
-    // if we get here, then the passed-in node's sibling is free, and we can coalesce
+        if (!NODE_IS_FREE(sibling)) {
+            // sibling is at least partially in use, we can not coalesce
+            return;
+        }
 
-    kmem_free_real(kmem_arena, (vm_offset_t)n, sizeof(struct kmem_1gig_free_node));
-    kmem_free_real(kmem_arena, (vm_offset_t)sibling, sizeof(struct kmem_1gig_free_node));
+        // the passed-in node's sibling is a free leaf node, we can coalesce
 
-    parent->left_child = NULL;
-    parent->right_child = NULL;
+        kmem_free_real(
+            kmem_arena,
+            (vm_offset_t)n,
+            sizeof(struct kmem_1gig_node)
+        );
+        kmem_free_real(
+            kmem_arena,
+            (vm_offset_t)sibling,
+            sizeof(struct kmem_1gig_node)
+        );
 
-    kmem_1gig_coalesce(p, parent);
+        parent->left_child = NULL;
+        parent->right_child = NULL;
+
+        n = parent;
+    } while (1);
 }
 
 
-// we might have to add interior nodes to reach down to the leaf node that will represent this va/size pair
-// we might have to coalesce this chunk with its buddy, and recursively up the tree
 static void
-kmem_free_1gig_to_page(struct kmem_1gig_page *p, vm_offset_t addr, vm_size_t size)
-{
+kmem_free_1gig_to_page(
+    struct kmem_1gig_page *p,
+    vm_offset_t addr,
+    vm_size_t size
+) {
     vm_size_t node_size;  // size of the node we're freeing this chunk to
-    struct kmem_1gig_free_node *n;
+    struct kmem_1gig_node *n;
 
-    KASSERT(cold || mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
-
-    if (p->root == NULL) {
-        p->root = (void*)kmem_malloc_real(kmem_arena, sizeof(struct kmem_1gig_free_node), M_NOWAIT);
-        if (p->root == NULL) {
-            printf("kmem_free_1gig_to_page: out of memory!\n");
-            return;
-        }
-        p->root->va = p->va;
-        p->root->size = 1024*1024*1024;
-        p->root->parent = NULL;
-        p->root->left_child = NULL;
-        p->root->right_child = NULL;
-    }
+    KASSERT_MTX_OWNED();
+    KASSERT(
+        p->root != NULL,
+        ("%s: kmem 1gig page without a root node!", __FUNCTION__)
+    );
 
     n = p->root;
-
 
     //
     // We're freeing a chunk with a given virtual address and size.
@@ -577,60 +676,106 @@ kmem_free_1gig_to_page(struct kmem_1gig_page *p, vm_offset_t addr, vm_size_t siz
     //
 
     node_size = round_up_to_power_of_2(size);
-    KASSERT(node_size >= 4096, ("kmem_free_1gig_to_page: round_up_to_power_of_2(%lu) returned %lu, expected 4096\n", size, node_size));
+    KASSERT(
+        node_size >= 4096,
+        (
+            "%s: round_up_to_power_of_2(%lu) "
+            " returned %lu, expected 4096\n",
+            __FUNCTION__,
+            size,
+            node_size
+        )
+    );
 
-    while (node_size < n->size) {
-        // The current node is too big for what we're freeing, go down
-        // one level (left or right, depending on virtual address).
-        if (addr < (n->va + (n->size / 2))) {
+    // walk the tree down to the leaf node that tracks this chunk of memory,
+    // clearing the 'in-use' bit as we go
+    while (!NODE_IS_LEAF(n) && (n->size > node_size)) {
+        KASSERT(
+            NODE_HAS_BOTH_CHILDREN(n),
+            (
+                "%s: freeing VA %p led to an internal node %p "
+                "with missing child",
+                __FUNCTION__,
+                (void*)addr,
+                (void*)n
+            )
+        );
+
+        if (addr < ((n->va & ~KMEM_1GIG_IN_USE) + (n->size / 2))) {
             // the chunk we're freeing is in the left tree of the current node
-            if (n->left_child == NULL) {
-                // allocate the left child, if needed
-                n->left_child = (void*)kmem_malloc_real(kmem_arena, sizeof(struct kmem_1gig_free_node), M_NOWAIT);
-                if (n->left_child == NULL) {
-                    printf("kmem_free_1gig_to_page: out of memory!\n");
-                    return;
-                }
-                n->left_child->size = n->size / 2;
-                n->left_child->va = n->va;
-                n->left_child->parent = n;
-                n->left_child->left_child = NULL;
-                n->left_child->right_child = NULL;
-            }
+            n->va &= ~KMEM_1GIG_LEFT_IN_USE;
             n = n->left_child;
-
         } else {
             // the chunk we're freeing is in the right tree of the current node
-            if (n->right_child == NULL) {
-                n->right_child = (void*)kmem_malloc_real(kmem_arena, sizeof(struct kmem_1gig_free_node), M_NOWAIT);
-                if (n->right_child == NULL) {
-                    printf("kmem_free_1gig_to_page: out of memory!\n");
-                    return;
-                }
-                n->right_child->size = n->size / 2;
-                n->right_child->va = n->va + n->right_child->size;
-                n->right_child->parent = n;
-                n->right_child->left_child = NULL;
-                n->right_child->right_child = NULL;
-            }
+            n->va &= ~KMEM_1GIG_RIGHT_IN_USE;
             n = n->right_child;
         }
     }
 
-    // If we get here, then the chunk we're freeing belongs on this
-    // level, and it better belong exactly to the current node or we're
-    // lost in the tree!
+    // n is the node that tracks this chunk of memory!
 
-    // we found the node where this memory belongs!
-    KASSERT(n->va == addr, ("kmem_free_1gig_to_page: found the node, but the va is wrong\n"));
-    KASSERT(n->size == node_size, ("kmem_free_1gig_to_page: found the node, but the size is wrong\n"));
-    KASSERT(n->left_child == NULL, ("kmem_free_1gig_to_page: found the node, but the left child is not NULL\n"));
-    KASSERT(n->right_child == NULL, ("kmem_free_1gig_to_page: found the node, but the right child is not NULL\n"));
+    KASSERT(
+        NODE_IS_ALLOCATED(n),
+        (
+            "%s: va=%p, size=%luk, found the node { va=%p, size=%luk, l=%d, "
+            "r=%d } but it's not marked in-use\n",
+            __FUNCTION__,
+            (void*)addr,
+            size/1024,
+            (void*)n->va,
+            n->size/1024,
+            (n->va & KMEM_1GIG_LEFT_IN_USE) ? 1 : 0,
+            (n->va & KMEM_1GIG_RIGHT_IN_USE) ? 1 : 0
+        )
+    );
+    KASSERT(
+        NODE_IS_LEAF(n),
+        (
+            "%s: va=%p, size=%luk, found the node { va=%p, size=%luk, l=%d, "
+            "r=%d }, but it's not a leaf\n",
+            __FUNCTION__,
+            (void*)addr,
+            size/1024,
+            (void*)n->va,
+            n->size/1024,
+            (n->va & KMEM_1GIG_LEFT_IN_USE) ? 1 : 0,
+            (n->va & KMEM_1GIG_RIGHT_IN_USE) ? 1 : 0
+        )
+    );
+    KASSERT(
+        n->va == (addr | KMEM_1GIG_IN_USE),
+        (
+            "%s: va=%p, size=%luk, found the node { va=%p, size=%luk, l=%d, "
+            "r=%d }, but the VA is wrong\n",
+            __FUNCTION__,
+            (void*)addr,
+            size/1024,
+            (void*)n->va,
+            n->size/1024,
+            (n->va & KMEM_1GIG_LEFT_IN_USE) ? 1 : 0,
+            (n->va & KMEM_1GIG_RIGHT_IN_USE) ? 1 : 0
+        )
+    );
+    KASSERT(
+        n->size >= node_size,
+        (
+            "%s: va=%p, size=%luk, found the node { va=%p, size=%luk, l=%d, "
+            "r=%d }, but the size is too small\n",
+            __FUNCTION__,
+            (void*)addr,
+            size/1024,
+            (void*)n->va,
+            n->size/1024,
+            (n->va & KMEM_1GIG_LEFT_IN_USE) ? 1 : 0,
+            (n->va & KMEM_1GIG_RIGHT_IN_USE) ? 1 : 0
+        )
+    );
 
-    // try to merge this node with its buddy, and recursively up the tree
-    kmem_1gig_coalesce(p, n);
+    // mark the node as not in use
+    n->va &= ~KMEM_1GIG_IN_USE;
 
-    return;
+    // try to merge this node with its buddy, and on up the tree
+    kmem_1gig_coalesce(n);
 }
 
 
@@ -673,9 +818,9 @@ kmem_free_1gig(struct vmem *vmem, vm_offset_t addr, vm_size_t size)
 
 
 static int
-kmem_1gig_count_free_chunks(struct kmem_1gig_free_node *n, vm_size_t size)
+kmem_1gig_count_free_chunks(struct kmem_1gig_node *n, vm_size_t size)
 {
-    KASSERT(cold || mtx_owned(&kmem_1gig_mutex), ("%s: kmem 1gig mutex not owned!", __FUNCTION__));
+    KASSERT_MTX_OWNED();
 
     if (n == NULL) {
         return 0;
@@ -685,16 +830,22 @@ kmem_1gig_count_free_chunks(struct kmem_1gig_free_node *n, vm_size_t size)
         return 0;
     }
 
+    // no free memory at or below this node
+    if (NODE_IS_ALLOCATED(n)) {
+        return 0;
+    }
+
     if (n->size == size) {
-        if (n->left_child || n->right_child) {
-            // this node has the right size, but it's not a leaf node so it's not entirely free
+        if (!NODE_IS_FREE(n)) {
+            // this node has the right size, but it's not free
             return 0;
         }
         return 1;
     }
 
     // this node is too big, ask both children
-    return kmem_1gig_count_free_chunks(n->left_child, size) + kmem_1gig_count_free_chunks(n->right_child, size);
+    return kmem_1gig_count_free_chunks(n->left_child, size) +
+        kmem_1gig_count_free_chunks(n->right_child, size);
 }
 
 
@@ -702,8 +853,9 @@ kmem_1gig_count_free_chunks(struct kmem_1gig_free_node *n, vm_size_t size)
 // debug sysctls for 1 gig buddy allocator
 //
 
-// set this one to a positive value to allocate that much memory in the first available allocation slot
-// set it to a negative value to free the allocation slot
+// Set this one to a positive value to allocate that much memory in the first
+// available allocation slot.  Set it to a negative value to free the
+// allocation slot.
 static int sysctl_1gig_buddy_alloc(SYSCTL_HANDLER_ARGS);
 SYSCTL_PROC(
     _debug,
@@ -752,7 +904,8 @@ static struct {
 static int sysctl_1gig_buddy_alloc(SYSCTL_HANDLER_ARGS) {
     long alloc;
     int error;
-    int num_alloc_slots = sizeof(kmem_1gig_allocations) / sizeof(kmem_1gig_allocations[0]);
+    int num_alloc_slots = sizeof(kmem_1gig_allocations) /
+        sizeof(kmem_1gig_allocations[0]);
     int i;
 
     alloc = -99999;
@@ -767,7 +920,11 @@ static int sysctl_1gig_buddy_alloc(SYSCTL_HANDLER_ARGS) {
     if (alloc < 0) {
         alloc *= -1;
         if (alloc < num_alloc_slots) {
-            kmem_free_1gig(kmem_arena, kmem_1gig_allocations[alloc].va, kmem_1gig_allocations[alloc].size);
+            kmem_free_1gig(
+                kmem_arena,
+                kmem_1gig_allocations[alloc].va,
+                kmem_1gig_allocations[alloc].size
+            );
             kmem_1gig_allocations[alloc].va = 0;
             kmem_1gig_allocations[alloc].size = 0;
         }
@@ -790,7 +947,8 @@ static int sysctl_1gig_buddy_alloc(SYSCTL_HANDLER_ARGS) {
 static int sysctl_1gig_buddy_alloc_state(SYSCTL_HANDLER_ARGS) {
     struct sbuf *sb;
     int error;
-    int num_alloc_slots = sizeof(kmem_1gig_allocations) / sizeof(kmem_1gig_allocations[0]);
+    int num_alloc_slots = sizeof(kmem_1gig_allocations) /
+        sizeof(kmem_1gig_allocations[0]);
     int i;
     struct kmem_1gig_page *p;
 
@@ -848,7 +1006,12 @@ static int sysctl_1gig_buddy_alloc_state(SYSCTL_HANDLER_ARGS) {
         );
 
         for (size = 1024*1024*1024; size >= PAGE_SIZE; size /= 2) {
-            sbuf_printf(sb, "        %10ld-byte free chunks: %d\n", size, kmem_1gig_count_free_chunks(p->root, size));
+            sbuf_printf(
+                sb,
+                "        %10ld-byte free chunks: %d\n",
+                size,
+                kmem_1gig_count_free_chunks(p->root, size)
+            );
         }
     }
     if (!cold) {
