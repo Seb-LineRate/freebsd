@@ -889,6 +889,12 @@ pmap_bootstrap(vm_paddr_t *firstaddr)
 	vm_offset_t va;
 	pt_entry_t *pte;
 
+	// Disable the 1 gig buddy allocator if the CPU does not support
+	// 1 gig pages.
+	if (0 == (amd_feature & AMDID_PAGE1GB)) {
+		vm_1gig_buddy_enable = 0;
+	}
+
 	/*
 	 * Create an initial set of page tables to run the kernel in.
 	 */
