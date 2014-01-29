@@ -850,8 +850,14 @@ kmem_1gig_count_free_chunks(struct kmem_1gig_node *n, vm_size_t size)
 
 
 //
-// debug sysctls for 1 gig buddy allocator
+// sysctls for 1 gig buddy allocator
 //
+
+// tunable to enable the 1 gig buddy allocator
+int vm_1gig_buddy_enable = 1;
+SYSCTL_INT(_vm, OID_AUTO, vm_1gig_buddy_enable, CTLFLAG_RDTUN,
+	&vm_1gig_buddy_enable, 0, "enable the 1 gig buddy allocator");
+TUNABLE_INT("vm.vm_1gig_buddy_enable", &vm_1gig_buddy_enable);
 
 // Set this one to a positive value to allocate that much memory in the first
 // available allocation slot.  Set it to a negative value to free the

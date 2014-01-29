@@ -309,7 +309,11 @@ kmem_suballoc(vm_map_t parent, vm_offset_t *min, vm_offset_t *max,
 vm_offset_t
 kmem_malloc(struct vmem *vmem, vm_size_t size, int flags)
 {
-    return kmem_malloc_1gig(vmem, size, flags);
+	if (vm_1gig_buddy_enable) {
+		return kmem_malloc_1gig(vmem, size, flags);
+	} else {
+		return kmem_malloc_real(vmem, size, flags);
+	}
 }
 
 vm_offset_t
@@ -507,7 +511,11 @@ kmem_unback(vm_object_t object, vm_offset_t addr, vm_size_t size)
 void
 kmem_free(struct vmem *vmem, vm_offset_t addr, vm_size_t size)
 {
-        kmem_free_1gig(vmem, addr, size);
+	if (vm_1gig_buddy_enable) {
+		kmem_free_1gig(vmem, addr, size);
+	} else {
+		kmem_free_real(vmem, addr, size);
+	}
 }
 
 void

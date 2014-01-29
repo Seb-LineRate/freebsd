@@ -129,6 +129,7 @@ extern	unsigned long maxdsiz;
 extern	unsigned long dflssiz;
 extern	unsigned long maxssiz;
 extern	unsigned long sgrowsiz;
+extern	int           vm_1gig_buddy_enable;
 #endif				/* _KERNEL */
 #endif				/* ASSEMBLER */
 #endif				/* _VM_PARAM_ */
