@@ -82,6 +82,8 @@ struct kmem_1gig_page {
 };
 
 
+static int vm_1gig_fetching_another_page = 0;
+
 TAILQ_HEAD(kmem_1gig_page_list, kmem_1gig_page) kmem_1gig_pages =
 	TAILQ_HEAD_INITIALIZER(kmem_1gig_pages);
 
@@ -111,11 +113,27 @@ MTX_SYSINIT(kmem_1gig_mutex, &kmem_1gig_mutex, "kmem 1gig mutex", MTX_DEF);
 } while(0)
 
 
+#define WAKEUP() do { \
+    if (!cold) { \
+        wakeup(&vm_1gig_fetching_another_page); \
+    } \
+} while(0)
+
+
 #define KASSERT_MTX_OWNED()                                   \
     do {                                                      \
         KASSERT(                                              \
             cold || mtx_owned(&kmem_1gig_mutex),              \
             ("%s: kmem 1gig mutex not owned!", __FUNCTION__)  \
+        );                                                    \
+    } while(0)
+
+
+#define KASSERT_MTX_NOT_OWNED()                               \
+    do {                                                      \
+        KASSERT(                                              \
+            cold || !mtx_owned(&kmem_1gig_mutex),              \
+            ("%s: kmem 1gig mutex owned when it sholdnt be!", __FUNCTION__)  \
         );                                                    \
     } while(0)
 
@@ -162,6 +180,10 @@ static inline vm_size_t
 kmem_1gig_node_size_at_level(int level)
 {
     vm_size_t node_size = 1024 * 1024 * 1024;
+    KASSERT(
+        (level >= 0) && (level < KMEM_1GIG_NUM_LEVELS),
+        ("%s: invalid level %d", __FUNCTION__, level)
+    );
     return node_size >> level;
 }
 
@@ -248,7 +270,23 @@ kmem_1gig_mark_node_free(struct kmem_1gig_page *p, int level, int node)
 
 static inline int
 kmem_1gig_va_to_node(struct kmem_1gig_page *p, int level, vm_offset_t va) {
-    return (va - p->va) / kmem_1gig_node_size_at_level(level);
+    int node;
+    KASSERT(
+        (va >= p->va) && (va < (p->va + (1024 * 1024 * 1024))),
+        ("%s: va=0x%lx is not on page at va=0x%lx!", __FUNCTION__, va, p->va)
+    );
+    node =  (va - p->va) / kmem_1gig_node_size_at_level(level);
+    KASSERT(
+        (p->va + (node * kmem_1gig_node_size_at_level(level)) == va),
+        (
+            "%s: va=0x%lx is not on a node boundary (p->va=0x%lx, "
+            "node=%d, node_size=0x%lx, node va=0x%lx)",
+            __FUNCTION__, va, p->va, node,
+            kmem_1gig_node_size_at_level(level),
+            p->va + (node * kmem_1gig_node_size_at_level(level))
+        )
+    );
+    return node;
 }
 
 
@@ -468,6 +506,9 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
 }
 
 
+// Allocate and initialize another 1 gig page, but don't insert it into the
+// list.  Return it instead, the caller will take the 1 gig lock and insert the
+// page.
 static struct kmem_1gig_page *
 kmem_1gig_add_page(void)
 {
@@ -475,9 +516,10 @@ kmem_1gig_add_page(void)
     vm_offset_t va;
     int level;
 
-    KASSERT_MTX_OWNED();
+    KASSERT_MTX_NOT_OWNED();
+    KASSERT(vm_1gig_fetching_another_page, ("%s: fetching another 1 gig page "
+            "without advertising that fact...", __FUNCTION__));
 
-    // FIXME: ruh roh, calling the real allocator with the 1 gig lock held
     va = kmem_malloc_1gig_page(kmem_arena, M_NOWAIT);
     if (va == 0) {
         static int complained_once = 0;
@@ -515,8 +557,6 @@ kmem_1gig_add_page(void)
     p->bytes_free = 1024 * 1024 * 1024;
     p->bytes_allocated = 0;
     p->bytes_handed_out = 0;
-
-    TAILQ_INSERT_TAIL(&kmem_1gig_pages, p, list);
 
     return p;
 
@@ -559,6 +599,9 @@ kmem_malloc_1gig(struct vmem *vmem, vm_size_t size, int flags)
 
     LOCK();
 
+retry:
+    KASSERT_MTX_OWNED();
+
     // do we have a 1 gig page with a big enough free chunk?
     TAILQ_FOREACH(p, &kmem_1gig_pages, list) {
         va = kmem_1gig_find_free(p, size);
@@ -574,30 +617,72 @@ kmem_malloc_1gig(struct vmem *vmem, vm_size_t size, int flags)
         }
     }
 
-    // didn't find a page with free space for this allocation
-    p = kmem_1gig_add_page();
-    if (p != NULL) {
-        // we got a new 1gig page!
-        va = kmem_1gig_find_free(p, size);
-        if (va != 0) {
-            // found one, return it quick!
-            kmem_1gig_alloc_bookkeeping(p, size);
-            kmem_1gig_sort_page_list(p);
+    // Didn't find a page with free space for this allocation.
+    // Set the indicator flag that says to other threads calling the 1 gig
+    // buddy allocator "a thread is trying to add another page, have
+    // patience".  We set this indicator while holding the 1 gig buddy
+    // lock, so only one thread at a time tries to add memory.
+
+    if (vm_1gig_fetching_another_page) {
+        // some other thread is trying to fetch another page
+        KASSERT(!cold, ("%s: multiple threads in 1 gig buddy allocator while "
+                    "system is cold!", __FUNCTION__));
+
+        if (flags & M_NOWAIT) {
             UNLOCK();
-            if (flags & M_ZERO) {
-                bzero((void*)va, size);
-            }
-            return va;
+            DELAY(10);
+            LOCK();
+        } else {
+            msleep(
+                &vm_1gig_fetching_another_page,
+                &kmem_1gig_mutex,
+                0,
+                "1gig page",
+                0
+            );
         }
+        goto retry;
     }
 
-    // fall back to the real allocator
+    // we're the lucky thread that gets to fetch more memory
+    vm_1gig_fetching_another_page = 1;
     UNLOCK();
+    p = kmem_1gig_add_page();
+    LOCK();
+    vm_1gig_fetching_another_page = 0;
+    WAKEUP();
+    if (p == NULL) {
+        // failed to get another gig, fall back to the real allocator
+        if (!complained_once) {
+            printf("kmem_malloc_1gig: failed, using the real allocator\n");
+            complained_once = 1;
+        }
+        UNLOCK();
+        return kmem_malloc_real(vmem, size, flags);
+    }
+
+    // got another gig!
+    TAILQ_INSERT_TAIL(&kmem_1gig_pages, p, list);
+
+    // we got a new 1gig page!
+    va = kmem_1gig_find_free(p, size);
+    if (va != 0) {
+        // found one, return it quick!
+        kmem_1gig_alloc_bookkeeping(p, size);
+        kmem_1gig_sort_page_list(p);
+        UNLOCK();
+        if (flags & M_ZERO) {
+            bzero((void*)va, size);
+        }
+        return va;
+    }
 
     if (!complained_once) {
         printf("kmem_malloc_1gig: failed, using the real allocator\n");
         complained_once = 1;
     }
+
+    UNLOCK();
 
     return kmem_malloc_real(vmem, size, flags);
 }
@@ -639,6 +724,16 @@ kmem_free_1gig_to_page(
 
     // the level and address give us the node index
     node = kmem_1gig_va_to_node(p, level, addr);
+    KASSERT(
+        (node >= 0) && (node < kmem_1gig_num_nodes_at_level(level)),
+        (
+            "%s: got invalid node number (p->va=0x%lx, level=%d, addr=0x%lx)",
+            __FUNCTION__,
+            p->va,
+            level,
+            addr
+        )
+    );
 
     if (!kmem_1gig_node_in_use(p, level, node)) {
         // this should never happen
@@ -676,7 +771,7 @@ kmem_free_1gig_to_page(
 
     // This node is free now, if the sibling is also free then mark the parent
     // free.
-    do {
+    while (level > 0) {
         int sibling_node = kmem_1gig_sibling_node(node);
         if (kmem_1gig_node_in_use(p, level, sibling_node)) {
             // sibling is in use, so this is where we stop
@@ -690,7 +785,7 @@ kmem_free_1gig_to_page(
             ("%s: ancestor node not in use!", __FUNCTION__)
         );
         kmem_1gig_mark_node_free(p, level, node);
-    } while (level > 0);
+    }
 }
 
 
