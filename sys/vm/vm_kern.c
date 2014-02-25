@@ -223,6 +223,20 @@ kmem_alloc_contig(struct vmem *vmem, vm_size_t size, int flags, vm_paddr_t low,
     vm_paddr_t high, u_long alignment, vm_paddr_t boundary,
     vm_memattr_t memattr)
 {
+	if (vm_1gig_buddy_enable) {
+		return kmem_alloc_contig_1gig(vmem, size, flags, low, high,
+			alignment, boundary, memattr);
+	} else {
+		return kmem_alloc_contig_real(vmem, size, flags, low, high,
+			alignment, boundary, memattr);
+	}
+}
+
+vm_offset_t
+kmem_alloc_contig_real(struct vmem *vmem, vm_size_t size, int flags, vm_paddr_t low,
+    vm_paddr_t high, unsigned long alignment, unsigned long boundary,
+    vm_memattr_t memattr)
+{
 	vm_object_t object = vmem == kmem_arena ? kmem_object : kernel_object;
 	vm_offset_t addr, tmp;
 	vm_ooffset_t offset;

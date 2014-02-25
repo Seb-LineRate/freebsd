@@ -55,6 +55,12 @@ vm_offset_t kmem_alloc_attr(struct vmem *, vm_size_t size, int flags,
 vm_offset_t kmem_alloc_contig(struct vmem *, vm_size_t size, int flags,
     vm_paddr_t low, vm_paddr_t high, u_long alignment, vm_paddr_t boundary,
     vm_memattr_t memattr);
+vm_offset_t kmem_alloc_contig_real(struct vmem *, vm_size_t size, int flags,
+    vm_paddr_t low, vm_paddr_t high, u_long alignment, vm_paddr_t boundary,
+    vm_memattr_t memattr);
+vm_offset_t kmem_alloc_contig_1gig(struct vmem *, vm_size_t size, int flags,
+    vm_paddr_t low, vm_paddr_t high, u_long alignment, vm_paddr_t boundary,
+    vm_memattr_t memattr);
 
 vm_offset_t kmem_malloc(struct vmem *, vm_size_t size, int flags);
 vm_offset_t kmem_malloc_1gig(struct vmem *, vm_size_t size, int flags);

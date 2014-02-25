@@ -73,6 +73,7 @@ struct kmem_1gig_page {
     unsigned char *in_use_bitmap[KMEM_1GIG_NUM_LEVELS];
 
     vm_offset_t va;
+    vm_paddr_t pa;
 
     uint64_t bytes_free;
     uint64_t bytes_allocated;    // how much did our users ask for?
@@ -554,6 +555,7 @@ kmem_1gig_add_page(void)
     }
 
     p->va = va;
+    p->pa = pmap_extract(kernel_pmap, p->va);
     p->bytes_free = 1024 * 1024 * 1024;
     p->bytes_allocated = 0;
     p->bytes_handed_out = 0;
@@ -579,22 +581,25 @@ fail0:
 }
 
 
-vm_offset_t
-kmem_malloc_1gig(struct vmem *vmem, vm_size_t size, int flags)
-{
+static vm_offset_t
+kmem_alloc_1gig_internal(
+    struct vmem *vmem, vm_size_t size, int flags, vm_paddr_t low,
+    vm_paddr_t high, unsigned long alignment, unsigned long boundary,
+    vm_memattr_t memattr, int contig
+) {
     vm_offset_t va;
     struct kmem_1gig_page *p;
     static int complained_once = 0;
 
-    if (vmem != kmem_arena) {
-        // printf("%s: not kmem_arena, punting to old malloc (size=%lu)\n", __func__, size);
-        return kmem_malloc_real(vmem, size, flags);
-    }
+    size = ulmax(size, alignment);
 
     if (size > 1024*1024*1024) {
-        // punt
-        printf("kmem_malloc_1gig: request too big, using the real allocator\n");
-        return kmem_malloc_real(vmem, size, flags);
+        printf("%s: request too big, using the real allocator\n", __FUNCTION__);
+        goto punt;
+    }
+
+    if (vmem != kmem_arena) {
+        goto punt;
     }
 
     LOCK();
@@ -604,6 +609,9 @@ retry:
 
     // do we have a 1 gig page with a big enough free chunk?
     TAILQ_FOREACH(p, &kmem_1gig_pages, list) {
+        if ((p->pa < low) || ((p->pa + (1<<30)) > high)) {
+            continue;
+        }
         va = kmem_1gig_find_free(p, size);
         if (va != 0) {
             // found one, return it quick!
@@ -654,17 +662,20 @@ retry:
     if (p == NULL) {
         // failed to get another gig, fall back to the real allocator
         if (!complained_once) {
-            printf("kmem_malloc_1gig: failed, using the real allocator\n");
+            printf("%s: failed, using the real allocator\n", __FUNCTION__);
             complained_once = 1;
         }
         UNLOCK();
-        return kmem_malloc_real(vmem, size, flags);
+        goto punt;
     }
 
     // got another gig!
     TAILQ_INSERT_TAIL(&kmem_1gig_pages, p, list);
 
-    // we got a new 1gig page!
+    if ((p->pa < low) || ((p->pa + (1<<30)) > high)) {
+        goto punt;
+    }
+
     va = kmem_1gig_find_free(p, size);
     if (va != 0) {
         // found one, return it quick!
@@ -678,13 +689,47 @@ retry:
     }
 
     if (!complained_once) {
-        printf("kmem_malloc_1gig: failed, using the real allocator\n");
+        printf("%s: failed, using the real allocator\n", __FUNCTION__);
         complained_once = 1;
     }
 
     UNLOCK();
 
-    return kmem_malloc_real(vmem, size, flags);
+punt:
+    if (contig) {
+        return kmem_alloc_contig_real(vmem, size, flags, low, high,
+            alignment, boundary, memattr);
+    } else {
+        return kmem_malloc_real(vmem, size, flags);
+    }
+}
+
+
+vm_offset_t
+kmem_malloc_1gig(struct vmem *vmem, vm_size_t size, int flags)
+{
+    return kmem_alloc_1gig_internal(
+        vmem, size, flags,
+        0,            // low phys addr
+        UINTPTR_MAX,  // high phys addr
+        0x1,          // alignment
+        0,            // boundary
+        0,            // memattr, not used for non-contig
+        0             // *not* contig
+    );
+}
+
+vm_offset_t
+kmem_alloc_contig_1gig(struct vmem *vmem, vm_size_t size, int flags, vm_paddr_t low,
+    vm_paddr_t high, unsigned long alignment, unsigned long boundary,
+    vm_memattr_t memattr)
+{
+    return kmem_alloc_1gig_internal(
+        vmem, size, flags,
+        low, high, alignment,
+        boundary, memattr,
+        1 // contig
+    );
 }
 
 
