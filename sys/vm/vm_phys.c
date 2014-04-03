@@ -607,7 +607,7 @@ sysctl_dump_pmap(SYSCTL_HANDLER_ARGS)
 	struct sbuf *sb;
 	struct proc *p;
 	int error;
-
+	pmap_t pmap;
 
 	sb = sbuf_new(NULL, NULL, 2 * 1024, SBUF_FIXEDLEN);
 	if (sb == NULL) {
@@ -621,11 +621,18 @@ sysctl_dump_pmap(SYSCTL_HANDLER_ARGS)
 	}
 
 	// pfind() returns the process locked
-	p = pfind(vm_pid_to_dump_pmap);
-	if (p == NULL) {
+	if (vm_pid_to_dump_pmap > 0) {
+	    p = pfind(vm_pid_to_dump_pmap);
+	    if (p == NULL) {
 		sbuf_printf(sb, "pid_to_dump_pmap %d not found\n", vm_pid_to_dump_pmap);
 		goto done;
+	    }
+	    pmap = &p->p_vmspace->vm_pmap;
+	} else {
+	    p = NULL;
+	    pmap = kernel_pmap;
 	}
+
 
 	sbuf_printf(sb, "pmap of pid %d (virtual address 0x%016lx):\n", vm_pid_to_dump_pmap, vm_pointer_to_dump_pmap);
 
@@ -702,13 +709,16 @@ sysctl_dump_pmap(SYSCTL_HANDLER_ARGS)
 		sbuf_printf(sb, " )\n");
 	}
 
-	PMAP_LOCK(&p->p_vmspace->vm_pmap);
+	PMAP_LOCK(pmap);
 
-	sbuf_printf(sb, "physical map: %p\n", &p->p_vmspace->vm_pmap);
-	db_dump_pml4((printf_t)sbuf_printf, sb, p->p_vmspace->vm_pmap.pm_pml4);
+	sbuf_printf(sb, "physical map: %p\n", pmap);
+	db_dump_pml4((printf_t)sbuf_printf, sb, pmap->pm_pml4);
 
-	PMAP_UNLOCK(&p->p_vmspace->vm_pmap);
-	PROC_UNLOCK(p);
+	PMAP_UNLOCK(pmap);
+
+	if (p != NULL) {
+	    PROC_UNLOCK(p);
+	}
 
 done:
 	sbuf_finish(sb);
