@@ -4364,13 +4364,28 @@ resume:
 			continue;
 		}
 
+		if (*pdpe & PG_PS) {
+			if (!pv_lists_locked) {
+				pv_lists_locked = TRUE;
+				if (!rw_try_wlock(&pvh_global_lock)) {
+					if (anychanged)
+						pmap_invalidate_all(pmap);
+					PMAP_UNLOCK(pmap);
+					rw_wlock(&pvh_global_lock);
+					goto resume;
+				}
+			}
+			if (!pmap_demote_pdpe(pmap, pdpe, sva)) {
+				panic("%s: PDPE demotion failed", __FUNCTION__);
+			}
+			// demoted the 1 gig page, fall through and deal with
+			// the 2 meg page below
+		}
+
 		va_next = (sva + NBPDR) & ~PDRMASK;
 		if (va_next < sva)
 			va_next = eva;
 
-		if (*pdpe & PG_PS) {
-			panic("pmap_protect() trying to get a PDT from a PDPT with PS!  pmap=%p, sva=0x%016lx, eva=0x%016lx, prot=%x", pmap, sva, eva, prot);
-		}
 		pde = pmap_pdpe_to_pde(pdpe, sva);
 		KASSERT(pde != NULL, ("pmap_protect: NULL PDE from a valid PDPE!"));
 		ptpaddr = *pde;
