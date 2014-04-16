@@ -365,8 +365,9 @@ typedef int (*printf_t)(void * arg, const char * fmt, ... );
 
 // must be called with the pmap locked
 static void
-db_dump_pte(printf_t p_printf, void *p_arg, pt_entry_t *pt, int index)
+db_dump_pte(printf_t p_printf, void *p_arg, pt_entry_t *pt, vm_offset_t va)
 {
+	int index = (va >> 12) & 0x1ff;
 	pt_entry_t *pte = &pt[index];
 
 	p_printf(p_arg, "                                PTE (index %d) @ %p (DMAP KVA): 0x%016lx (", index, pte, *pte);
@@ -395,7 +396,8 @@ db_dump_pte(printf_t p_printf, void *p_arg, pt_entry_t *pt, int index)
 
 	{
 		uint8_t *p;
-		p = (uint8_t *)PHYS_TO_DMAP(*pte & PG_FRAME);
+		p = (uint8_t *)(PHYS_TO_DMAP(*pte & PG_FRAME) | (va &
+                            ~PG_FRAME));
 		p_printf(
 			p_arg,
 			"                                    contents: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
@@ -415,20 +417,18 @@ db_dump_pte(printf_t p_printf, void *p_arg, pt_entry_t *pt, int index)
 
 // must be called with the pmap locked
 static void
-db_dump_pt(printf_t p_printf, void *p_arg, pt_entry_t *pt)
+db_dump_pt(printf_t p_printf, void *p_arg, pt_entry_t *pt, vm_offset_t va)
 {
-	int i;
-
 	p_printf(p_arg, "                            PT @ %p (DMAP KVA):\n", pt);
-	i = (vm_pointer_to_dump_pmap >> 12) & 0x1ff;
-	db_dump_pte(p_printf, p_arg, pt, i);
+	db_dump_pte(p_printf, p_arg, pt, va);
 }
 
 
 // must be called with the pmap locked
 static void
-db_dump_pde(printf_t p_printf, void *p_arg, pd_entry_t *pd, int index)
+db_dump_pde(printf_t p_printf, void *p_arg, pd_entry_t *pd, vm_offset_t va)
 {
+	int index = (va >> 21) & 0x1ff;
 	pd_entry_t *pde = &pd[index];
 
 	p_printf(p_arg, "                        PDE (index %d) @ %p (DMAP KVA): 0x%016lx (", index, pde, *pde);
@@ -462,7 +462,8 @@ db_dump_pde(printf_t p_printf, void *p_arg, pd_entry_t *pd, int index)
 
 	if (*pde & PG_PS) {
 		uint8_t *p;
-		p = (uint8_t *)PHYS_TO_DMAP(*pde & PG_FRAME);
+		p = (uint8_t *)(PHYS_TO_DMAP(*pde & PG_PS_FRAME) | (va &
+                            ~PG_PS_FRAME));
 		p_printf(
 			p_arg,
 			"                            contents: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
@@ -478,26 +479,25 @@ db_dump_pde(printf_t p_printf, void *p_arg, pd_entry_t *pd, int index)
 		return;
 	}
 
-	db_dump_pt(p_printf, p_arg, (pt_entry_t *)PHYS_TO_DMAP(*pde & PG_FRAME));
+	db_dump_pt(p_printf, p_arg, (pt_entry_t *)PHYS_TO_DMAP(*pde & PG_FRAME),
+                va);
 }
 
 
 // must be called with the pmap locked
 static void
-db_dump_pd(printf_t p_printf, void *p_arg, pd_entry_t *pd)
+db_dump_pd(printf_t p_printf, void *p_arg, pd_entry_t *pd, vm_offset_t va)
 {
-	int i;
-
 	p_printf(p_arg, "                    PD @ %p (DMAP KVA)\n", pd);
-	i = (vm_pointer_to_dump_pmap >> 21) & 0x1ff;
-	db_dump_pde(p_printf, p_arg, pd, i);
+	db_dump_pde(p_printf, p_arg, pd, va);
 }
 
 
 // must be called with the pmap locked
 static void
-db_dump_pdpte(printf_t p_printf, void *p_arg, pdp_entry_t *pdpt, int index)
+db_dump_pdpte(printf_t p_printf, void *p_arg, pdp_entry_t *pdpt, vm_offset_t va)
 {
+	int index = (va >> 30) & 0x1ff;
 	pdp_entry_t *pdpte = &pdpt[index];
 
 	p_printf(p_arg, "                PDPTE (index %d) @ %p (DMAP KVA): 0x%016lx (", index, pdpte, *pdpte);
@@ -531,7 +531,8 @@ db_dump_pdpte(printf_t p_printf, void *p_arg, pdp_entry_t *pdpt, int index)
 
 	if (*pdpte & PG_PS) {
 		uint8_t *p;
-		p = (uint8_t *)PHYS_TO_DMAP(*pdpte & PG_FRAME);
+		p = (uint8_t *)(PHYS_TO_DMAP(*pdpte & PG_1GB_PS_FRAME) | (va &
+                            ~PG_1GB_PS_FRAME));
 		p_printf(
 			p_arg,
 			"                            contents: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
@@ -546,26 +547,25 @@ db_dump_pdpte(printf_t p_printf, void *p_arg, pdp_entry_t *pdpt, int index)
 		);
 		return;
 	}
-	db_dump_pd(p_printf, p_arg, (pd_entry_t *)PHYS_TO_DMAP(*pdpte & PG_FRAME));
+	db_dump_pd(p_printf, p_arg, (pd_entry_t *)PHYS_TO_DMAP(*pdpte &
+                    PG_FRAME), va);
 }
 
 
 // must be called with the pmap locked
 static void
-db_dump_pdpt(printf_t p_printf, void *p_arg, pdp_entry_t *pdpt)
+db_dump_pdpt(printf_t p_printf, void *p_arg, pdp_entry_t *pdpt, vm_offset_t va)
 {
-	int i;
-
 	p_printf(p_arg, "            PDPT @ %p (DMAP KVA):\n", pdpt);
-	i = (vm_pointer_to_dump_pmap >> 30) & 0x1ff;
-	db_dump_pdpte(p_printf, p_arg, pdpt, i);
+	db_dump_pdpte(p_printf, p_arg, pdpt, va);
 }
 
 
 // must be called with the pmap locked
 static void
-db_dump_pml4e(printf_t p_printf, void *p_arg, pml4_entry_t *pml4, int index)
+db_dump_pml4e(printf_t p_printf, void *p_arg, pml4_entry_t *pml4, vm_offset_t va)
 {
+	int index = (va >> 39) & 0x1ff;
 	pml4_entry_t *pml4e = &pml4[index];
 
 	p_printf(p_arg, "        PML4E (index %d) @ %p (KVA): 0x%016lx (", index, pml4e, *pml4e);
@@ -585,19 +585,17 @@ db_dump_pml4e(printf_t p_printf, void *p_arg, pml4_entry_t *pml4, int index)
 	if (*pml4e & PG_NX)     p_printf(p_arg, " ExecuteDisable");
 	p_printf(p_arg, " )\n");
 
-	db_dump_pdpt(p_printf, p_arg, (pdp_entry_t *)PHYS_TO_DMAP(*pml4e & PG_FRAME));
+	db_dump_pdpt(p_printf, p_arg, (pdp_entry_t *)PHYS_TO_DMAP(*pml4e &
+                    PG_FRAME), va);
 }
 
 
 // must be called with the pmap locked
 static void
-db_dump_pml4(printf_t p_printf, void *p_arg, pml4_entry_t *pml4)
+db_dump_pml4(printf_t p_printf, void *p_arg, pml4_entry_t *pml4, vm_offset_t va)
 {
-	int i;
-
 	p_printf(p_arg, "    PML4 @ %p (KVA):\n", pml4);
-	i = (vm_pointer_to_dump_pmap >> 39) & 0x1ff;
-	db_dump_pml4e(p_printf, p_arg, pml4, i);
+	db_dump_pml4e(p_printf, p_arg, pml4, va);
 }
 
 
@@ -712,7 +710,8 @@ sysctl_dump_pmap(SYSCTL_HANDLER_ARGS)
 	PMAP_LOCK(pmap);
 
 	sbuf_printf(sb, "physical map: %p\n", pmap);
-	db_dump_pml4((printf_t)sbuf_printf, sb, pmap->pm_pml4);
+	db_dump_pml4((printf_t)sbuf_printf, sb, pmap->pm_pml4,
+                (vm_offset_t)vm_pointer_to_dump_pmap);
 
 	PMAP_UNLOCK(pmap);
 
@@ -1528,7 +1527,7 @@ _DB_FUNC(_show, pmap, db_show_pmap, db_show_table, CS_OWN, NULL)
 
 	db_printf("physical map: %p walking to VA: %p\n",
 	    pmap, (void*)vm_pointer_to_dump_pmap);
-	db_dump_pml4(mydb_printf, NULL, pmap->pm_pml4);
+	db_dump_pml4(mydb_printf, NULL, pmap->pm_pml4, vm_pointer_to_dump_pmap);
 
 	//PMAP_UNLOCK(pmap);
 }
