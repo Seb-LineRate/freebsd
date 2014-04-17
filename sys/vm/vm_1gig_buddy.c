@@ -70,7 +70,7 @@ struct kmem_1gig_page {
     // tracks the first 512 MB chunk of the page and the most significant bit
     // tracks the second 512 MB chunk.
     // The smallest tracked chunk in 4 kB, so there are 18 levels.
-    unsigned char *in_use_bitmap[KMEM_1GIG_NUM_LEVELS];
+    uint64_t *in_use_bitmap[KMEM_1GIG_NUM_LEVELS];
 
     vm_offset_t va;
     vm_paddr_t pa;
@@ -200,8 +200,8 @@ kmem_1gig_num_nodes_at_level(int level)
 static inline int
 kmem_1gig_node_in_use(struct kmem_1gig_page *p, int level, int node)
 {
-    int byte = node / 8;
-    int bit = node % 8;
+    int word = node / 64;
+    int bit = node % 64;
     KASSERT_MTX_OWNED();
     KASSERT(
         (level >= 0) && (level < KMEM_1GIG_NUM_LEVELS),
@@ -217,15 +217,15 @@ kmem_1gig_node_in_use(struct kmem_1gig_page *p, int level, int node)
             kmem_1gig_num_nodes_at_level(level)
         )
     );
-    return p->in_use_bitmap[level][byte] & (1 << bit);
+    return (0 != (p->in_use_bitmap[level][word] & (1ULL << bit)));
 }
 
 
 static inline void
 kmem_1gig_mark_node_in_use(struct kmem_1gig_page *p, int level, int node)
 {
-    int byte = node / 8;
-    int bit = node % 8;
+    int word = node / 64;
+    int bit = node % 64;
     KASSERT_MTX_OWNED();
     KASSERT(
         (level >= 0) && (level < KMEM_1GIG_NUM_LEVELS),
@@ -241,15 +241,15 @@ kmem_1gig_mark_node_in_use(struct kmem_1gig_page *p, int level, int node)
             kmem_1gig_num_nodes_at_level(level)
         )
     );
-    p->in_use_bitmap[level][byte] |= (1 << bit);
+    p->in_use_bitmap[level][word] |= (1ULL << bit);
 }
 
 
 static inline void
 kmem_1gig_mark_node_free(struct kmem_1gig_page *p, int level, int node)
 {
-    int byte = node / 8;
-    int bit = node % 8;
+    int word = node / 64;
+    int bit = node % 64;
     KASSERT_MTX_OWNED();
     KASSERT(
         (level >= 0) && (level < KMEM_1GIG_NUM_LEVELS),
@@ -265,7 +265,7 @@ kmem_1gig_mark_node_free(struct kmem_1gig_page *p, int level, int node)
             kmem_1gig_num_nodes_at_level(level)
         )
     );
-    p->in_use_bitmap[level][byte] &= ~(1 << bit);
+    p->in_use_bitmap[level][word] &= ~(1ULL << bit);
 }
 
 
@@ -410,6 +410,29 @@ static void kmem_1gig_sort_page_list(struct kmem_1gig_page *p) {
     } while (1);
 }
 
+static inline int
+bit_ffc_64(uint64_t *bits, int nbits)
+{
+    uint64_t *cur = bits;
+    uint64_t *over = cur + ((nbits - 1)/64) + 1;
+    int bit=-1;
+    if (nbits <= 0) {
+        return (-1);
+    }
+    for (; cur < over; cur++) {
+        int ls = ffsl(~(*cur));
+        if (ls > 0) {
+            bit = (ls-1) + (64 * (cur - bits));
+            break;
+        }
+    }
+
+    if (bit >= nbits) {
+        bit = -1;
+    }
+    return bit;
+}
+
 
 //
 // See if there's a free chunk of the requested size on this 1 gig page.
@@ -442,17 +465,11 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
 
     level = kmem_1gig_find_level(node_size);
     num_nodes = kmem_1gig_num_nodes_at_level(level);
-
-    for (node = 0; node < num_nodes; node++) {
-        if (!kmem_1gig_node_in_use(p, level, node)) {
-            break;
-        }
-    }
-
-    if (node == num_nodes) {
-        // got to the end of the array, no free nodes
+    node = bit_ffc_64(p->in_use_bitmap[level], num_nodes);
+    if ( node < 0 ) {
         return 0;
     }
+    MPASS(!kmem_1gig_node_in_use(p, level, node));
 
     va = p->va + (node * node_size);
 
@@ -543,8 +560,8 @@ kmem_1gig_add_page(void)
     bzero(p->in_use_bitmap, sizeof(p->in_use_bitmap));
 
     for (level = 0; level < KMEM_1GIG_NUM_LEVELS; level ++) {
-        int num_bytes = (kmem_1gig_num_nodes_at_level(level) / 8) + 1;
-        p->in_use_bitmap[level] = (unsigned char *)kmem_malloc_real(
+        int num_bytes = ((kmem_1gig_num_nodes_at_level(level) / 64) + 1) * 8;
+        p->in_use_bitmap[level] = (uint64_t*)kmem_malloc_real(
             kmem_arena,
             num_bytes,
             M_NOWAIT | M_ZERO
@@ -585,8 +602,8 @@ static vm_offset_t
 kmem_alloc_1gig_internal(
     struct vmem *vmem, vm_size_t size, int flags, vm_paddr_t low,
     vm_paddr_t high, unsigned long alignment, unsigned long boundary,
-    vm_memattr_t memattr, int contig
-) {
+    vm_memattr_t memattr, int contig)
+{
     vm_offset_t va;
     struct kmem_1gig_page *p;
     static int complained_once = 0;
