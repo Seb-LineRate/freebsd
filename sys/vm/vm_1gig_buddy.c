@@ -70,6 +70,7 @@ struct kmem_1gig_page {
     // tracks the first 512 MB chunk of the page and the most significant bit
     // tracks the second 512 MB chunk.
     // The smallest tracked chunk in 4 kB, so there are 18 levels.
+    int  word_index[KMEM_1GIG_NUM_LEVELS];
     uint64_t *in_use_bitmap[KMEM_1GIG_NUM_LEVELS];
 
     vm_offset_t va;
@@ -505,6 +506,7 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
     uint64_t num_nodes;
     int level;
     int node;  // index of the free node
+    int first;
 
     KASSERT_MTX_OWNED();
     KASSERT(p != NULL, ("%s: NULL page passed in!", __FUNCTION__));
@@ -524,16 +526,23 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
     );
 
     level = kmem_1gig_find_level(node_size);
+    first = p->word_index[level];
     num_nodes = kmem_1gig_num_nodes_at_level(level);
-    node = bit_ffc_64(p->in_use_bitmap[level], num_nodes);
+    MPASS(first <= _bit_qword(num_nodes-1));
+    node = bit_ffc_64(&p->in_use_bitmap[level][first], num_nodes - (first*64));
+    MPASS(bit_ffc_64(p->in_use_bitmap[level], num_nodes) == node + (first*64));
     if ( node < 0 ) {
         return 0;
     }
+    node += (first*64);
     MPASS(!kmem_1gig_node_in_use(p, level, node));
+
+    // Save the qword to search next time
+    p->word_index[level] = _bit_qword(node);
 
     va = p->va + (node * node_size);
 
-    // mark this node as in use
+    // mark this node as in use.
     kmem_1gig_mark_node_in_use(p, level, node);
 
     // mark all the children as in-use
@@ -566,6 +575,13 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
             // our sibling might be in use, in which case our ancestors would
             // be in use too
             kmem_1gig_mark_node_in_use(p, ancestor_level, ancestor_node);
+	    //
+	    // Save the qword to search next time. Since all nodes to the left
+	    // at the requested level are in-use, then all ancestors to the
+	    // left must also be in use.
+	    if(_bit_qword(ancestor_node) > p->word_index[ancestor_level]) {
+		    p->word_index[ancestor_level] = _bit_qword(ancestor_node);
+	    }
         }
     }
 
@@ -606,6 +622,7 @@ kmem_1gig_add_page(void)
         goto fail1;
     }
 
+    bzero(p->word_index, sizeof(p->word_index));
     bzero(p->in_use_bitmap, sizeof(p->in_use_bitmap));
 
     for (level = 0; level < KMEM_1GIG_NUM_LEVELS; level ++) {
@@ -803,8 +820,8 @@ static void
 kmem_free_1gig_to_page(
     struct kmem_1gig_page *p,
     vm_offset_t addr,
-    vm_size_t size
-) {
+    vm_size_t size)
+{
     vm_size_t node_size;  // size of the node we're freeing this chunk to
     int node;
     int level;
@@ -853,6 +870,9 @@ kmem_free_1gig_to_page(
 
     // mark this node as free
     kmem_1gig_mark_node_free(p, level, node);
+    if(_bit_qword(node) < p->word_index[level]) {
+    	p->word_index[level] = _bit_qword(node);
+    }
 
     // mark all the children as free
     {
@@ -868,6 +888,9 @@ kmem_free_1gig_to_page(
 
 	    kmem_1gig_mark_nodes_free(p, child_level,
 		first_child_node, first_child_node + num_child_nodes -1);
+	    if(_bit_qword(first_child_node) < p->word_index[child_level]) {
+		p->word_index[child_level] = _bit_qword(first_child_node);
+	    }
         }
     }
 
@@ -887,6 +910,9 @@ kmem_free_1gig_to_page(
             ("%s: ancestor node not in use!", __FUNCTION__)
         );
         kmem_1gig_mark_node_free(p, level, node);
+	if(_bit_qword(node) < p->word_index[level]) {
+	    p->word_index[level] = _bit_qword(node);
+	}
     }
 }
 
