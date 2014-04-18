@@ -244,6 +244,66 @@ kmem_1gig_mark_node_in_use(struct kmem_1gig_page *p, int level, int node)
     p->in_use_bitmap[level][word] |= (1ULL << bit);
 }
 
+// Lifted and modified from sys/bitstring
+#define	_bit_qword(bit) ((bit) >> 6)
+
+				/* clear bits start ... stop in bitstring */
+static inline void
+bit_nclear64(uint64_t *bits, int start, int stop)
+{
+	int startword = _bit_qword(start);
+	int stopword = _bit_qword(stop);
+	// NOTE: shift twice to ensure no shift is all 64 bits, which is
+	// undefined
+	if (startword == stopword) {
+		bits[startword] &= (((UINT64_MAX >> (63 - (start&63)))>>1) |
+				      ((UINT64_MAX << (stop&63)) << 1));
+	} else {
+		bits[startword] &= (UINT64_MAX >> (63 - (start&63))) >> 1;
+		while (++startword < stopword)
+			bits[startword] = 0;
+		bits[stopword] &= (UINT64_MAX << (stop&63)) << 1;
+	}
+}
+
+static inline void
+bit_nset64(uint64_t *bits, int start, int stop)
+{
+	int startword = _bit_qword(start);
+	int stopword = _bit_qword(stop);
+	if (startword == stopword) {
+		bits[startword] |= ((UINT64_MAX << (start&63)) &
+				      (UINT64_MAX >> (63 - (stop&63))));
+	} else {
+		bits[startword] |= UINT64_MAX << (start&63);
+		while (++startword < stopword)
+			bits[startword] = UINT64_MAX;
+		bits[stopword] |= UINT64_MAX >> (63 - (stop&63));
+	}
+}
+
+static inline void
+kmem_1gig_mark_nodes_in_use(struct kmem_1gig_page *p, int level, int first, int last)
+{
+    KASSERT_MTX_OWNED();
+    MPASS(first <= last);
+    MPASS((level >= 0) && (level < KMEM_1GIG_NUM_LEVELS));
+    MPASS(first >= 0 && (first < kmem_1gig_num_nodes_at_level(level)));
+    MPASS(last >= 0 && (last < kmem_1gig_num_nodes_at_level(level)));
+    bit_nset64(p->in_use_bitmap[level], first, last);
+}
+
+static inline void
+kmem_1gig_mark_nodes_free(struct kmem_1gig_page *p, int level, int first, int last)
+{
+    KASSERT_MTX_OWNED();
+    MPASS(first <= last);
+    MPASS((level >= 0) && (level < KMEM_1GIG_NUM_LEVELS));
+    MPASS(first >= 0 && (first < kmem_1gig_num_nodes_at_level(level)));
+    MPASS(last >= 0 && (last < kmem_1gig_num_nodes_at_level(level)));
+    bit_nclear64(p->in_use_bitmap[level], first, last);
+}
+
 
 static inline void
 kmem_1gig_mark_node_free(struct kmem_1gig_page *p, int level, int node)
@@ -486,20 +546,9 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
             child_level ++
         ) {
             int num_child_nodes = 1 << (child_level - level);
-            int child_node;
             first_child_node <<= 1;
-            for (
-                child_node = first_child_node;
-                num_child_nodes > 0;
-                child_node ++, num_child_nodes --
-            ) {
-                KASSERT(
-                    !kmem_1gig_node_in_use(p, child_level, child_node),
-                    ("%s: child node already in use (level %d, node %d)!",
-                     __FUNCTION__, child_level, child_node)
-                );
-                kmem_1gig_mark_node_in_use(p, child_level, child_node);
-            }
+	    kmem_1gig_mark_nodes_in_use(p, child_level,
+		first_child_node, first_child_node + num_child_nodes - 1);
         }
     }
 
@@ -815,19 +864,10 @@ kmem_free_1gig_to_page(
             child_level ++
         ) {
             int num_child_nodes = 1 << (child_level - level);
-            int child_node;
             first_child_node <<= 1;
-            for (
-                child_node = first_child_node;
-                num_child_nodes > 0;
-                child_node ++, num_child_nodes --
-            ) {
-                KASSERT(
-                    kmem_1gig_node_in_use(p, child_level, child_node),
-                    ("%s: child node not in use!", __FUNCTION__)
-                );
-                kmem_1gig_mark_node_free(p, child_level, child_node);
-            }
+
+	    kmem_1gig_mark_nodes_free(p, child_level,
+		first_child_node, first_child_node + num_child_nodes -1);
         }
     }
 
