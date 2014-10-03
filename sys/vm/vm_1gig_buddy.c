@@ -530,11 +530,11 @@ kmem_1gig_find_free(struct kmem_1gig_page *p, vm_size_t size)
     num_nodes = kmem_1gig_num_nodes_at_level(level);
     MPASS(first <= _bit_qword(num_nodes-1));
     node = bit_ffc_64(&p->in_use_bitmap[level][first], num_nodes - (first*64));
-    MPASS(bit_ffc_64(p->in_use_bitmap[level], num_nodes) == node + (first*64));
     if ( node < 0 ) {
         return 0;
     }
     node += (first*64);
+    MPASS(bit_ffc_64(p->in_use_bitmap[level], num_nodes) == node);
     MPASS(!kmem_1gig_node_in_use(p, level, node));
 
     // Save the qword to search next time
