@@ -363,6 +363,9 @@ long vmspace_resident_count(struct vmspace *vmspace);
 
 #define VM_MAP_WIRE_WRITE	4	/* Validate writable. */
 
+#define VM_MAP_WIRE_NO_1GB_PAGE	0	/* region can be mapped to pages of any size */
+#define VM_MAP_WIRE_1GB_PAGE	8	/* region must be mapped to 1GB superpages */
+
 #ifdef _KERNEL
 boolean_t vm_map_check_protection (vm_map_t, vm_offset_t, vm_offset_t, vm_prot_t);
 vm_map_t vm_map_create(pmap_t, vm_offset_t, vm_offset_t);

@@ -2604,15 +2604,19 @@ vm_map_wire(vm_map_t map, vm_offset_t start, vm_offset_t end,
 			vm_map_unlock(map);
 
 			faddr = saved_start;
-			do {
-				/*
-				 * Simulate a fault to get the page and enter
-				 * it into the physical map.
-				 */
-				if ((rv = vm_fault(map, faddr, VM_PROT_NONE,
-				    VM_FAULT_CHANGE_WIRING)) != KERN_SUCCESS)
-					break;
-			} while ((faddr += PAGE_SIZE) < saved_end);
+			if (flags & VM_MAP_WIRE_1GB_PAGE) {
+				rv = vm_fault_wire_1gb(map, saved_start, saved_end, user_wire);
+			} else {
+				do {
+					/*
+					 * Simulate a fault to get the page and enter
+					 * it into the physical map.
+					 */
+					if ((rv = vm_fault(map, faddr, VM_PROT_NONE,
+					    VM_FAULT_CHANGE_WIRING)) != KERN_SUCCESS)
+						break;
+				} while ((faddr += PAGE_SIZE) < saved_end);
+			}
 			vm_map_lock(map);
 			vm_map_unbusy(map);
 			if (last_timestamp + 1 != map->timestamp) {

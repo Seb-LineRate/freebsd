@@ -95,6 +95,7 @@
 #ifdef __LP64__
 #define	MAP_32BIT	 0x00080000 /* map in the low 2GB of address space */
 #endif
+#define	MAP_1GB_PAGE      0x10000000 /* use a 1 GB superpage or fail the mmap */
 
 /*
  * Request specific alignment (n == log2 of the desired alignment).
